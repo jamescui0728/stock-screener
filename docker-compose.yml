@@ -1,0 +1,60 @@
+# 长期价值股票筛选系统 · Docker 部署编排
+#
+# 启动：     docker compose up -d
+# 关闭：     docker compose down
+# 看日志：   docker compose logs -f
+# 重新构建： docker compose up -d --build
+#
+# 首次启动后，需要手动跑一次数据初始化（拉股票/行业/财报，30-60 分钟）：
+#   docker compose run --rm backend python scripts/init_data.py
+
+services:
+  backend:
+    build:
+      context: .                    # 项目根（要拷 backend/ + docs/ + README.md）
+      dockerfile: backend/Dockerfile
+    image: stock-screener-backend:latest
+    container_name: stock-screener-backend
+    restart: unless-stopped
+    environment:
+      # ⚠️ 生产部署务必通过 .env 改成强随机值（openssl rand -base64 32）
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-this-should-be-random-and-long}
+      # SQLite 数据库放 volume 里，容器删了数据还在
+      DATABASE_URL: sqlite:////data/stock_screener.db
+      TZ: Asia/Shanghai
+    volumes:
+      - backend_data:/data          # SQLite 数据库 + WAL/SHM
+      # user_settings.json 用 bind mount，方便宿主机直接编辑参数（前端"参数设置"页面也写这）
+      - ./backend/user_settings.json:/app/backend/user_settings.json:rw
+    networks:
+      - stock-screener
+    expose:
+      - "8000"                       # 仅在 compose 网络内可达；外部走 frontend 的 nginx 反代
+    # 如果想直接从宿主机访问后端（调试用），取消注释下面：
+    # ports:
+    #   - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: stock-screener-frontend:latest
+    container_name: stock-screener-frontend
+    restart: unless-stopped
+    ports:
+      # 浏览器访问 http://localhost:${HTTP_PORT}（默认 8080）
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy   # 等后端 /health 就绪再起 nginx
+    networks:
+      - stock-screener
+
+volumes:
+  backend_data:
+    name: stock-screener-data       # 显式命名，方便 docker volume inspect / 备份
+
+networks:
+  stock-screener:
+    name: stock-screener-net
+    driver: bridge

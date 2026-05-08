@@ -1,0 +1,36 @@
+# 不让本地虚拟环境 / 缓存进镜像（会大幅膨胀 + 平台不兼容）
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 本地数据库（每次都从空白启动，宿主机数据放 volume）
+*.db
+*.db-shm
+*.db-wal
+
+# 本地配置 / 日志（敏感）
+.env
+.env.local
+*.log
+user_settings.json
+
+# 测试 / 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 打包工件
+*.egg-info/
+dist/
+build/
+
+# 编辑器 / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

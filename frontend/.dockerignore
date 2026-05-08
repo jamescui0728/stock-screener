@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.cache/
+.parcel-cache/
+*.log
+.env
+.env.local
+.vscode/
+.idea/
+.DS_Store
+*.swp

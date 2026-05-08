@@ -1,0 +1,55 @@
+# ── 运行时数据（用户自己跑后会生成）─────────────────
+backend/stock_screener.db
+backend/stock_screener.db-shm
+backend/stock_screener.db-wal
+backend/*.sqlite*
+
+# ── 环境变量（含 JWT_SECRET 等敏感信息）─────────────
+.env
+.env.local
+.env.*.local
+
+# ── 用户配置覆盖（运行时被前端"参数设置"页修改）──────
+# 默认值已在 config.py 里，需要本地化时复制 user_settings.example.json
+backend/user_settings.json
+
+# ── Python ────────────────────────────────────────
+backend/.venv/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── Node / 前端 ───────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+frontend/.parcel-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── 编辑器 / OS ───────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── 日志 / 临时 ───────────────────────────────────
+*.log
+*.tmp
+*.bak
+/tmp/
+
+# ── Docker 相关临时 ───────────────────────────────
+docker-compose.override.yml
