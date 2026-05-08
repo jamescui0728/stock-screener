@@ -1,5 +1,12 @@
 # 长期价值股票筛选系统
 
+[![CI](https://github.com/jamescui0728/stock-screener/actions/workflows/ci.yml/badge.svg)](https://github.com/jamescui0728/stock-screener/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Vue](https://img.shields.io/badge/Vue-3.4-4FC08D?logo=vue.js&logoColor=white)](https://vuejs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+
 A 股长期价值投资量化筛选工具：**基本面 + 估值 + 行业 + 宏观 + 舆情** 五维评分，输出 5 等级买卖信号，附带模拟盘和回测功能。
 
 > 这是个人使用工具，不构成投资建议。
