@@ -197,12 +197,21 @@ def score_volprice(db: Session, stock_code: str, as_of_date=None) -> Optional[di
 # ════════════════════════════════════════════════════════════════
 # 3. 科技板块评分（0-100）
 # ════════════════════════════════════════════════════════════════
-def score_tech_sector(db: Session, stock_code: str) -> dict:
+def score_tech_sector(
+    db: Session, stock_code: str,
+    _cached_stock: Optional[Stock] = None,
+    _cached_industries: Optional[dict] = None,
+) -> dict:
     """
     白名单内 → 70 起步，再叠加行业评分加分（最高 +30）
     白名单外 → 30 起步，行业评分高（>=70）才加分
+
+    缓存参数（批量调用时传入，避免 N+1 查询）：
+    - _cached_stock: 已加载的 Stock 对象，省一次 Stock 表查询
+    - _cached_industries: {industry_code: Industry} 字典，省一次 Industry 表查询
     """
-    stock = db.query(Stock).filter_by(code=stock_code).first()
+    stock = _cached_stock if _cached_stock is not None else \
+            db.query(Stock).filter_by(code=stock_code).first()
     if not stock or not stock.industry_code:
         return {"score": 30.0, "is_tech": False}
 
@@ -210,7 +219,10 @@ def score_tech_sector(db: Session, stock_code: str) -> dict:
     base = 70.0 if is_tech else 30.0
 
     # 叠加行业评分
-    ind = db.query(Industry).filter_by(code=stock.industry_code).first()
+    if _cached_industries is not None:
+        ind = _cached_industries.get(stock.industry_code)
+    else:
+        ind = db.query(Industry).filter_by(code=stock.industry_code).first()
     ind_score = (ind.total_score or 50.0) if ind else 50.0
 
     if is_tech:
@@ -276,8 +288,23 @@ def score_news_heat(db: Session, stock_code: str, as_of_date=None) -> dict:
 def generate_short_signal(
     db: Session, stock_code: str, as_of_date=None,
     write_back: bool = True,
+    commit: bool = True,
+    # 批量优化缓存参数（单只调用时不传，调用方负责保证一致性）
+    _cached_macro_100: Optional[float] = None,
+    _cached_stock: Optional[Stock] = None,
+    _cached_industries: Optional[dict] = None,
 ) -> Optional[dict]:
-    """生成短期信号；价格数据不足时返回 None"""
+    """
+    生成短期信号；价格数据不足时返回 None。
+
+    write_back=True 时把结果写到 Stock 对象。
+    commit=True 时立即 db.commit()（单只调用默认；批量场景请传 False，最后统一 commit）。
+
+    批量场景的缓存参数：
+    - _cached_macro_100: 已计算的 macro_score / 15 * 100（全局共享，每只一样）
+    - _cached_stock:     已加载的 Stock 对象（避免重复查询）
+    - _cached_industries:{code → Industry} 字典（避免每只查 Industry 表）
+    """
     # 5 维评分
     mom = score_momentum(db, stock_code, as_of_date)
     if mom is None:
@@ -287,10 +314,17 @@ def generate_short_signal(
     if vp is None:
         return None
 
-    macro_raw  = score_macro(db, as_of_date)
-    macro_100  = macro_raw / 15 * 100   # 归一化到 0-100
+    # 宏观分：批量时复用缓存，避免每只重算 3 次 MacroData 查询
+    if _cached_macro_100 is not None:
+        macro_100 = _cached_macro_100
+    else:
+        macro_100 = score_macro(db, as_of_date) / 15 * 100
 
-    tech       = score_tech_sector(db, stock_code)
+    tech       = score_tech_sector(
+        db, stock_code,
+        _cached_stock=_cached_stock,
+        _cached_industries=_cached_industries,
+    )
     news_heat  = score_news_heat(db, stock_code, as_of_date)
 
     # 加权综合分
@@ -305,13 +339,20 @@ def generate_short_signal(
 
     # ── 5 等级判定 ──
     hard_sell_drop = vp["ret_5d"] / 100   # ret_5d 已经是百分比
+    ret_5d_pct = mom.get("ret_5d") or 0   # 来自 momentum 的 5 日涨幅（百分比）
     if hard_sell_drop < settings.SHORT_HARD_SELL_5D_DROP:
         # 硬卖：5 日跌幅超过 -10%（默认）
         signal = "STRONG_SELL"
         reason = f"近 5 日跌幅 {vp['ret_5d']:.1f}%，触发硬卖（< {settings.SHORT_HARD_SELL_5D_DROP*100:.0f}%）"
-    elif composite >= settings.SHORT_STRONG_BUY_THRESHOLD and (mom.get("ret_5d") or 0) > 0:
+    elif composite >= settings.SHORT_STRONG_BUY_THRESHOLD and ret_5d_pct > 2.0:
+        # 必买：综合分够 + 5 日涨幅 > 2%（实质性动能，而非微涨）
         signal = "STRONG_BUY"
         reason = _build_short_reason("STRONG_BUY", composite, mom, vp, macro_100, tech, news_heat)
+    elif composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
+        # 综合分够但短期动能不足（5日涨幅 <= 2%）→ 降级为买入
+        signal = "BUY"
+        reason = _build_short_reason("BUY", composite, mom, vp, macro_100, tech, news_heat)
+        reason += "（注：综合分达 STRONG_BUY，但 5 日动能未确认，降级为 BUY）"
     elif composite >= settings.SHORT_BUY_THRESHOLD:
         signal = "BUY"
         reason = _build_short_reason("BUY", composite, mom, vp, macro_100, tech, news_heat)
@@ -345,7 +386,9 @@ def generate_short_signal(
     }
 
     if write_back:
-        stock = db.query(Stock).filter_by(code=stock_code).first()
+        # 复用 _cached_stock 避免额外查询
+        stock = _cached_stock if _cached_stock is not None else \
+                db.query(Stock).filter_by(code=stock_code).first()
         if stock:
             stock.short_composite_score = composite
             stock.short_signal          = signal
@@ -356,7 +399,8 @@ def generate_short_signal(
             stock.short_score_macro     = round(macro_100, 2)
             stock.short_score_tech      = tech["score"]
             stock.short_score_news_heat = news_heat["score"]
-            db.commit()
+            if commit:
+                db.commit()
 
     return result
 
@@ -415,7 +459,24 @@ def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat) 
 # 6. 批量生成
 # ════════════════════════════════════════════════════════════════
 def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict:
-    """批量生成所有 active stocks 的短期信号"""
+    """
+    批量生成所有 active stocks 的短期信号。
+
+    性能优化（vs 单只循环调用）：
+    - macro_score 全局计算 1 次（替代 5196 次冗余查询）
+    - Industry 表预加载成 dict（替代 5196 次单查）
+    - Stock 对象直接传入（不重复 query）
+    - 循环里 write_back=True + commit=False，最后统一一次 commit
+    """
+    import time
+    t0 = time.time()
+
+    # 预加载缓存
+    macro_100        = score_macro(db) / 15 * 100
+    industries_map   = {i.code: i for i in db.query(Industry).all()}
+    logger.info(f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个")
+
+    # 拉所有股票（一次性，不在循环里）
     q = db.query(Stock).filter_by(is_active=True)
     if limit:
         q = q.limit(limit)
@@ -425,7 +486,13 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
     skipped = 0
     for stock in stocks:
         try:
-            r = generate_short_signal(db, stock.code, write_back=True)
+            r = generate_short_signal(
+                db, stock.code,
+                write_back=True, commit=False,        # 关键：不在循环里 commit
+                _cached_macro_100=macro_100,           # 复用全局 macro
+                _cached_stock=stock,                   # 直接用已加载的 Stock 对象
+                _cached_industries=industries_map,     # 复用 industries dict
+            )
             if r:
                 results[stock.code] = r["short_signal"]
             else:
@@ -434,7 +501,15 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
             logger.warning(f"短期信号 {stock.code}: {e}")
             skipped += 1
 
+    # 一次性提交（vs 5196 次单独 commit）
+    db.commit()
+
+    elapsed = time.time() - t0
     logger.info(
-        f"短期信号批量生成完成：成功 {len(results)} / 跳过 {skipped} / 共 {len(stocks)}"
+        f"短期信号批量生成完成：成功 {len(results)} / 跳过 {skipped} / "
+        f"共 {len(stocks)} / 耗时 {elapsed:.1f}s"
     )
-    return {"generated": len(results), "skipped": skipped, "total": len(stocks)}
+    return {
+        "generated": len(results), "skipped": skipped,
+        "total": len(stocks), "elapsed_sec": round(elapsed, 1),
+    }
