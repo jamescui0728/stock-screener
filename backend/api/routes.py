@@ -867,10 +867,10 @@ def get_financial_count(db: Session = Depends(get_db)):
 # ══════════════════════════════════════════════
 @router.post("/data/refresh-all")
 def refresh_all_data(background_tasks: BackgroundTasks):
-    """一键触发：宏观数据 → 行业重新评分 → 买卖信号刷新"""
+    """一键触发：宏观数据 → 行业重新评分 → 长期信号 → 短期信号"""
     from database import SessionLocal as _SL
     from data.task_tracker import start_refresh, mark_task
-    TASKS = ["宏观数据", "行业评分", "信号刷新"]
+    TASKS = ["宏观数据", "行业评分", "长期信号刷新", "短期信号刷新"]
     start_refresh(TASKS)
 
     def _run():
@@ -897,13 +897,22 @@ def refresh_all_data(background_tasks: BackgroundTasks):
             except Exception as e:
                 mark_task("行业评分", "error", str(e))
 
-            # 3. 信号刷新
-            mark_task("信号刷新", "running")
+            # 3. 长期信号刷新
+            mark_task("长期信号刷新", "running")
             try:
                 results = generate_all_signals(_db)
-                mark_task("信号刷新", "done", f"已生成 {len(results)} 只信号")
+                mark_task("长期信号刷新", "done", f"已生成 {len(results)} 只信号")
             except Exception as e:
-                mark_task("信号刷新", "error", str(e))
+                mark_task("长期信号刷新", "error", str(e))
+
+            # 4. 短期信号刷新（v200 加入）
+            mark_task("短期信号刷新", "running")
+            try:
+                r = generate_all_short_signals(_db)
+                mark_task("短期信号刷新", "done",
+                          f"成功 {r['generated']} / 跳过 {r['skipped']} / 共 {r['total']} / 耗时 {r['elapsed_sec']}s")
+            except Exception as e:
+                mark_task("短期信号刷新", "error", str(e))
         finally:
             _db.close()
 

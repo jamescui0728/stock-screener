@@ -29,10 +29,11 @@ scheduler = AsyncIOScheduler()
 # 定时任务
 # ──────────────────────────────────────────────
 def _daily_data_update():
-    """每天凌晨 2 点：更新宏观数据 + 财报 + 情感分析 + 刷新信号"""
+    """每天凌晨 2 点：宏观数据 → 财报 → 情感分析 → 长期信号 → 短期信号"""
     from data.fetcher import fetch_macro_data, fetch_all_financial_data
     from data.sentiment import analyze_all_news
     from engines.signal_engine import generate_all_signals
+    from engines.short_signal_engine import generate_all_short_signals
 
     db = SessionLocal()
     try:
@@ -41,6 +42,8 @@ def _daily_data_update():
         fetch_all_financial_data(db, limit=200)
         analyze_all_news(db)
         generate_all_signals(db)
+        # v200 加入：短期信号也需要每日刷新（依赖最新宏观 + 价格 + 新闻）
+        generate_all_short_signals(db)
         logger.info("定时任务：每日更新完成")
     except Exception as e:
         logger.error(f"定时任务失败: {e}")
