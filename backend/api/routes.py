@@ -91,17 +91,24 @@ def list_stocks(
     signal: Optional[str] = Query(
         None,
         description=(
-            "精确匹配单一等级：STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL。"
+            "长期信号精确匹配单一等级：STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL。"
             "大小写不敏感（内部 .upper() 统一为大写后比对，因 DB 存大写）。"
         ),
     ),
     signal_group: Optional[str] = Query(
         None,
         description=(
-            "聚合过滤：buy 包含 BUY+STRONG_BUY，sell 包含 SELL+STRONG_SELL。"
-            "大小写不敏感（内部 .lower() 统一为小写后比对，因这是接口语义参数而非 DB 值）。"
-            "与 signal 同时传时优先级更高（signal 被忽略）。"
+            "长期信号聚合过滤：buy 包含 BUY+STRONG_BUY，sell 包含 SELL+STRONG_SELL。"
+            "大小写不敏感。与 signal 同时传时优先级更高（signal 被忽略）。"
         ),
+    ),
+    short_signal: Optional[str] = Query(
+        None,
+        description="短期信号精确匹配，语义同 signal（v200 新增）",
+    ),
+    short_signal_group: Optional[str] = Query(
+        None,
+        description="短期信号聚合过滤（buy / sell），语义同 signal_group（v200 新增）",
     ),
     min_fundamental: float        = Query(0.0),
     min_composite:   float        = Query(0.0),
@@ -150,7 +157,7 @@ def list_stocks(
         }
     if industry_code:
         q = q.filter_by(industry_code=industry_code)
-    # signal_group 聚合优先：包含 STRONG_*
+    # 长期信号过滤
     if signal_group:
         sg = signal_group.lower()
         if sg == "buy":
@@ -160,8 +167,19 @@ def list_stocks(
         else:
             raise HTTPException(400, f"signal_group 仅支持 buy / sell，收到 {signal_group!r}")
     elif signal:
-        # 精确匹配单一等级
         q = q.filter_by(signal=signal.upper())
+
+    # 短期信号过滤（v200 新增，与长期信号过滤可同时生效，AND 关系）
+    if short_signal_group:
+        sg = short_signal_group.lower()
+        if sg == "buy":
+            q = q.filter(Stock.short_signal.in_(("BUY", "STRONG_BUY")))
+        elif sg == "sell":
+            q = q.filter(Stock.short_signal.in_(("SELL", "STRONG_SELL")))
+        else:
+            raise HTTPException(400, f"short_signal_group 仅支持 buy / sell，收到 {short_signal_group!r}")
+    elif short_signal:
+        q = q.filter_by(short_signal=short_signal.upper())
     if min_fundamental > 0:
         q = q.filter(Stock.fundamental_score >= min_fundamental)
     if min_composite > 0:
@@ -209,7 +227,7 @@ def refresh_signal(code: str, db: Session = Depends(get_db)):
 
 @router.post("/signals/refresh-all")
 def refresh_all_signals(background_tasks: BackgroundTasks):
-    """后台异步刷新所有信号"""
+    """后台异步刷新所有长期信号"""
     from database import SessionLocal as _SL
     from data.task_tracker import mark_task
     def _task():
@@ -224,6 +242,42 @@ def refresh_all_signals(background_tasks: BackgroundTasks):
             _db.close()
     background_tasks.add_task(_task)
     return {"message": "信号刷新已在后台启动"}
+
+
+# ── 短期信号（v200 新增）─────────────────────────────────
+from engines.short_signal_engine import (
+    generate_short_signal,
+    generate_all_short_signals,
+)
+
+
+@router.post("/stocks/{code}/short-signal")
+def refresh_short_signal(code: str, db: Session = Depends(get_db)):
+    """重算单只股票的短期信号"""
+    result = generate_short_signal(db, code)
+    if result is None:
+        raise HTTPException(422, "价格数据不足（需 ≥ 21 个交易日），无法生成短期信号")
+    return result
+
+
+@router.post("/signals/refresh-short")
+def refresh_all_short_signals(background_tasks: BackgroundTasks):
+    """后台异步刷新所有短期信号"""
+    from database import SessionLocal as _SL
+    from data.task_tracker import mark_task
+    def _task():
+        _db = _SL()
+        mark_task("短期信号刷新", "running")
+        try:
+            r = generate_all_short_signals(_db)
+            mark_task("短期信号刷新", "done",
+                      f"成功 {r['generated']} / 跳过 {r['skipped']} / 共 {r['total']}")
+        except Exception as e:
+            mark_task("短期信号刷新", "error", str(e))
+        finally:
+            _db.close()
+    background_tasks.add_task(_task)
+    return {"message": "短期信号刷新已在后台启动（约 1-2 分钟）"}
 
 
 # ══════════════════════════════════════════════
@@ -947,10 +1001,21 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "score_cashflow":         s.score_cashflow,
         "score_financial_health": s.score_financial_health,
         "score_valuation":        s.score_valuation,
+        # 长期信号
         "composite_score":        s.composite_score,
         "signal":                 s.signal,
         "signal_reason":          s.signal_reason,
         "signal_updated":         str(s.signal_updated) if s.signal_updated else None,
+        # 短期信号（v200 新增）
+        "short_composite_score":  s.short_composite_score,
+        "short_signal":           s.short_signal,
+        "short_signal_reason":    s.short_signal_reason,
+        "short_signal_updated":   str(s.short_signal_updated) if s.short_signal_updated else None,
+        "short_score_momentum":   s.short_score_momentum,
+        "short_score_volprice":   s.short_score_volprice,
+        "short_score_macro":      s.short_score_macro,
+        "short_score_tech":       s.short_score_tech,
+        "short_score_news_heat":  s.short_score_news_heat,
     }
 
 

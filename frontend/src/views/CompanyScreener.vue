@@ -13,8 +13,17 @@
             :prefix-icon="Search"
           />
         </el-form-item>
-        <el-form-item label="信号">
-          <el-select v-model="filter.signal" clearable placeholder="全部" style="width:130px">
+        <el-form-item label="长期信号">
+          <el-select v-model="filter.signal" clearable placeholder="全部" style="width:120px">
+            <el-option label="🟢 必买" value="STRONG_BUY" />
+            <el-option label="🟢 买入" value="BUY" />
+            <el-option label="🟡 持有" value="HOLD" />
+            <el-option label="🔴 卖出" value="SELL" />
+            <el-option label="🔴 必卖" value="STRONG_SELL" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="短期信号">
+          <el-select v-model="filter.short_signal" clearable placeholder="全部" style="width:120px">
             <el-option label="🟢 必买" value="STRONG_BUY" />
             <el-option label="🟢 买入" value="BUY" />
             <el-option label="🟡 持有" value="HOLD" />
@@ -51,7 +60,10 @@
         <div class="card-header">
           <span>共 {{ total }} 只股票</span>
           <el-button size="small" @click="refreshAll" :loading="refreshing">
-            刷新所有信号
+            刷新长期信号
+          </el-button>
+          <el-button size="small" @click="refreshAllShort" :loading="refreshingShort">
+            刷新短期信号
           </el-button>
         </div>
       </template>
@@ -78,14 +90,37 @@
             <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="信号" width="100">
+        <el-table-column label="长期信号" width="100">
+          <template #header>
+            <el-tooltip content="侧重基本面 + 估值，hold 6-12 月" placement="top">
+              <span>长期信号 <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <SignalBadge :signal="row.signal" />
+          </template>
+        </el-table-column>
+        <el-table-column label="短期信号" width="100">
+          <template #header>
+            <el-tooltip content="侧重动量 + 量价 + 宏观，hold 1-2 周" placement="top">
+              <span>短期信号 <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <SignalBadge v-if="row.short_signal" :signal="row.short_signal" />
+            <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
         <el-table-column label="综合评分" width="140" sortable prop="composite_score">
           <template #default="{ row }">
             <ScoreBar :score="row.composite_score" :max="100" />
+          </template>
+        </el-table-column>
+        <el-table-column label="短期评分" width="120" sortable prop="short_composite_score">
+          <template #default="{ row }">
+            <ScoreBar v-if="row.short_composite_score != null"
+                      :score="row.short_composite_score" :max="100" color="#9c27b0" />
+            <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
         <el-table-column label="基本面" width="120" sortable prop="fundamental_score">
@@ -152,8 +187,9 @@ const route  = useRoute()
 const router = useRouter()
 
 const loading      = ref(false)
-const refreshing   = ref(false)
-const refreshingCode = ref('')
+const refreshing      = ref(false)
+const refreshingShort = ref(false)
+const refreshingCode  = ref('')
 const stocks       = ref([])
 const industries   = ref([])
 const total        = ref(0)
@@ -162,6 +198,7 @@ const page         = ref(1)
 const filter = ref({
   keyword:         '',
   signal:          '',
+  short_signal:    '',
   industry_code:   route.query.industry || '',
   min_fundamental: 0,
   min_composite:   0,
@@ -183,7 +220,13 @@ async function load() {
 }
 
 function search() { page.value = 1; load() }
-function reset()  { filter.value = { keyword: '', signal: '', industry_code: '', min_fundamental: 0, min_composite: 0 }; load() }
+function reset()  {
+  filter.value = {
+    keyword: '', signal: '', short_signal: '',
+    industry_code: '', min_fundamental: 0, min_composite: 0,
+  }
+  load()
+}
 
 async function refreshOne(code) {
   refreshingCode.value = code
@@ -200,9 +243,19 @@ async function refreshAll() {
   refreshing.value = true
   try {
     await stockApi.refreshAllSignals()
-    ElMessage.success('全量信号刷新已启动')
+    ElMessage.success('长期信号刷新已启动')
   } finally {
     refreshing.value = false
+  }
+}
+
+async function refreshAllShort() {
+  refreshingShort.value = true
+  try {
+    await stockApi.refreshAllShortSignals()
+    ElMessage.success('短期信号刷新已启动（约 1-2 分钟后再点筛选查看）')
+  } finally {
+    refreshingShort.value = false
   }
 }
 

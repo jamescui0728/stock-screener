@@ -47,10 +47,13 @@ export const industryApi = {
 
 // ── 股票 ──
 export const stockApi = {
-  list: (params)            => http.get('/stocks', { params }),
-  detail: (code)            => http.get(`/stocks/${code}`),
-  refreshSignal: (code)     => http.post(`/stocks/${code}/signal`),
-  refreshAllSignals: ()     => http.post('/signals/refresh-all'),
+  list: (params)                  => http.get('/stocks', { params }),
+  detail: (code)                  => http.get(`/stocks/${code}`),
+  refreshSignal: (code)           => http.post(`/stocks/${code}/signal`),
+  refreshAllSignals: ()           => http.post('/signals/refresh-all'),
+  // 短期信号（v200 新增）
+  refreshShortSignal: (code)      => http.post(`/stocks/${code}/short-signal`),
+  refreshAllShortSignals: ()      => http.post('/signals/refresh-short'),
 }
 
 // ── 自选股 ──

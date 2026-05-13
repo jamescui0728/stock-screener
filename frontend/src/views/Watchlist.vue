@@ -125,7 +125,10 @@
               <span class="name">{{ s.name }}</span>
             </div>
             <div class="card-actions">
-              <SignalBadge :signal="s.signal" />
+              <div class="signal-pair-card">
+                <SignalBadge :signal="s.signal" />
+                <SignalBadge v-if="s.short_signal" :signal="s.short_signal" />
+              </div>
               <el-button
                 size="small" type="danger" text circle
                 @click="remove(s.code)" title="移除自选"
@@ -172,14 +175,27 @@
         >
           <el-table-column prop="code" label="代码" width="90" fixed />
           <el-table-column prop="name" label="名称" width="100" fixed />
-          <el-table-column label="信号" width="90" sortable prop="signal">
+          <el-table-column label="长期" width="90" sortable prop="signal">
             <template #default="{ row }">
               <SignalBadge :signal="row.signal" />
+            </template>
+          </el-table-column>
+          <el-table-column label="短期" width="90" sortable prop="short_signal">
+            <template #default="{ row }">
+              <SignalBadge v-if="row.short_signal" :signal="row.short_signal" />
+              <span v-else class="no-data">—</span>
             </template>
           </el-table-column>
           <el-table-column label="综合评分" width="140" sortable prop="composite_score">
             <template #default="{ row }">
               <ScoreBar :score="row.composite_score" :max="100" />
+            </template>
+          </el-table-column>
+          <el-table-column label="短期评分" width="120" sortable prop="short_composite_score">
+            <template #default="{ row }">
+              <ScoreBar v-if="row.short_composite_score != null"
+                        :score="row.short_composite_score" :max="100" color="#9c27b0" />
+              <span v-else class="no-data">—</span>
             </template>
           </el-table-column>
           <el-table-column label="基本面" width="130" sortable prop="fundamental_score">
@@ -410,6 +426,8 @@ onMounted(async () => {
 .code { font-weight: 700; color: #409eff; }
 .name { font-weight: 600; }
 .card-actions { display: flex; align-items: center; gap: 6px; }
+.signal-pair-card { display: inline-flex; gap: 4px; }
+.no-data { color: #bbb; font-size: 13px; }
 
 .score-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .score-col { display: flex; align-items: center; gap: 6px; }

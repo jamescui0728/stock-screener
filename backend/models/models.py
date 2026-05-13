@@ -80,11 +80,23 @@ class Stock(Base):
     score_valuation       = Column(Float, nullable=True)
     fundamental_score     = Column(Float, nullable=True)
 
-    # 综合建议分与信号
+    # ── 长期信号（侧重基本面 + 估值，hold 6-12 个月）──
     composite_score  = Column(Float, nullable=True)
     signal           = Column(String(15), nullable=True)   # STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL
     signal_reason    = Column(Text, nullable=True)
     signal_updated   = Column(DateTime, nullable=True)
+
+    # ── 短期信号（侧重动量 + 量价 + 宏观，hold 1-2 周）（v200 新增）──
+    short_composite_score = Column(Float, nullable=True)
+    short_signal          = Column(String(15), nullable=True)
+    short_signal_reason   = Column(Text, nullable=True)
+    short_signal_updated  = Column(DateTime, nullable=True)
+    # 子分（供前端展示和调参分析）
+    short_score_momentum  = Column(Float, nullable=True)   # 0-100
+    short_score_volprice  = Column(Float, nullable=True)
+    short_score_macro     = Column(Float, nullable=True)
+    short_score_tech      = Column(Float, nullable=True)
+    short_score_news_heat = Column(Float, nullable=True)
 
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

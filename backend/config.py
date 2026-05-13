@@ -75,6 +75,45 @@ class Settings(BaseSettings):
     # 金融行业要求 macro_pct >= 65，规避 NIM 压力期
     FIN_MACRO_MIN_SCORE: float = 65.0
 
+    # ═══════════════════════════════════════════════════════════
+    # 短期信号系统（v200 新增）
+    # ═══════════════════════════════════════════════════════════
+    # 与长期信号并行：长期看"能不能赚钱"，短期看"现在涨不涨"。
+    # 5 维度（独立于长期）：
+    #   动量 35% + 量价 15% + 宏观 25% + 科技板块 15% + 新闻热度 10%
+    # 持有周期假设：1-2 周（短线波段），非长期持有
+    SHORT_MOMENTUM_WEIGHT:  float = 0.35   # 价格动量 (5/20/60 日收益、MA20/60、RSI)
+    SHORT_VOLPRICE_WEIGHT:  float = 0.15   # 量价关系 (涨幅 × 量比)
+    SHORT_MACRO_WEIGHT:     float = 0.25   # 宏观环境 (复用 score_macro)
+    SHORT_TECH_WEIGHT:      float = 0.15   # 科技 / 政策板块
+    SHORT_NEWS_HEAT_WEIGHT: float = 0.10   # 新闻热度 + 情感
+    # 总和必须 = 1.0（启动时校验，否则评分会失真）
+
+    # 短期 5 等级阈值（与长期信号阈值独立）
+    SHORT_STRONG_BUY_THRESHOLD:  float = 75.0
+    SHORT_BUY_THRESHOLD:         float = 60.0
+    SHORT_SELL_THRESHOLD:        float = 45.0
+    SHORT_STRONG_SELL_THRESHOLD: float = 30.0
+    # 触发必卖的硬条件：近 5 日跌幅 > 10%
+    SHORT_HARD_SELL_5D_DROP: float = -0.10
+
+    # 科技 / 政策催化白名单（行业代码用 BK 前缀，对应 industries 表）
+    # 这些行业获得短期"科技板块"满分基础，再叠加行业评分
+    TECH_INDUSTRIES: set = frozenset({
+        "BK0475",  # 半导体
+        "BK0438",  # 软件开发
+        "BK0464",  # 计算机设备
+        "BK0436",  # 通信设备
+        "BK1015",  # 能源金属（锂、镍）
+        "BK1320",  # 逆变器
+        "BK0457",  # 电网设备
+        "BK1304",  # 锂电专用设备
+        "BK0480",  # 互联网服务
+        "BK1216",  # 医药生物（创新药/生物制品）
+        "BK1495",  # 光伏设备
+        "BK0479",  # 消费电子
+    })
+
     # ───────── 回测参数 ─────────
     BACKTEST_START_YEAR:  int = 2014
     BACKTEST_TRAIN_YEARS: int = 5

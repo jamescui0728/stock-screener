@@ -10,7 +10,13 @@
             </el-button>
             <span class="code">{{ detail.info.code }}</span>
             <span class="name">{{ detail.info.name }}</span>
-            <SignalBadge :signal="detail.info.signal" effect="dark" />
+            <span class="signal-pair">
+              <span class="signal-label">长期</span>
+              <SignalBadge :signal="detail.info.signal" effect="dark" />
+              <span class="signal-label" style="margin-left:10px">短期</span>
+              <SignalBadge v-if="detail.info.short_signal" :signal="detail.info.short_signal" effect="dark" />
+              <span v-else style="color:#bbb;font-size:12px">— 数据不足</span>
+            </span>
           </div>
           <div class="header-actions">
             <el-button size="small" @click="addWatch">
@@ -19,17 +25,28 @@
             <el-button size="small" type="primary" @click="refreshSignal" :loading="refreshing">
               重新评估
             </el-button>
+            <el-button size="small" @click="refreshShortSignal" :loading="refreshingShort">
+              重算短期
+            </el-button>
             <el-button size="small" @click="updateNews" :loading="updatingNews">
               更新舆情
             </el-button>
           </div>
         </div>
 
-        <!-- 信号理由 -->
+        <!-- 长期信号理由 -->
         <el-alert
           v-if="detail.info.signal_reason"
-          :title="detail.info.signal_reason"
+          :title="'长期：' + detail.info.signal_reason"
           :type="alertType"
+          show-icon :closable="false"
+          class="signal-alert"
+        />
+        <!-- 短期信号理由 -->
+        <el-alert
+          v-if="detail.info.short_signal_reason"
+          :title="'短期：' + detail.info.short_signal_reason"
+          :type="shortAlertType"
           show-icon :closable="false"
           class="signal-alert"
         />
@@ -132,16 +149,21 @@ import ScoreItem from '@/components/ScoreItem.vue'
 
 const route       = useRoute()
 const router      = useRouter()
-const loading     = ref(false)
-const refreshing  = ref(false)
-const updatingNews = ref(false)
-const detail      = ref(null)
-const chartMode   = ref('profit')
+const loading         = ref(false)
+const refreshing      = ref(false)
+const refreshingShort = ref(false)
+const updatingNews    = ref(false)
+const detail          = ref(null)
+const chartMode       = ref('profit')
 
-const alertType = computed(() => {
-  const s = detail.value?.info?.signal
-  return s === 'BUY' ? 'success' : s === 'SELL' ? 'error' : 'warning'
-})
+// 5 等级映射到 element-plus el-alert 的 4 种 type
+function _sigToAlertType(s) {
+  if (s === 'STRONG_BUY' || s === 'BUY') return 'success'
+  if (s === 'STRONG_SELL' || s === 'SELL') return 'error'
+  return 'warning'
+}
+const alertType      = computed(() => _sigToAlertType(detail.value?.info?.signal))
+const shortAlertType = computed(() => _sigToAlertType(detail.value?.info?.short_signal))
 
 const sentimentTagType = computed(() => {
   if (!detail.value?.news?.length) return 'info'
@@ -279,9 +301,22 @@ async function refreshSignal() {
   try {
     await stockApi.refreshSignal(route.params.code)
     await load()
-    ElMessage.success('信号已更新')
+    ElMessage.success('长期信号已更新')
   } finally {
     refreshing.value = false
+  }
+}
+
+async function refreshShortSignal() {
+  refreshingShort.value = true
+  try {
+    await stockApi.refreshShortSignal(route.params.code)
+    await load()
+    ElMessage.success('短期信号已更新')
+  } catch (e) {
+    ElMessage.error('刷新短期信号失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    refreshingShort.value = false
   }
 }
 
@@ -306,7 +341,9 @@ onMounted(load)
 
 <style scoped>
 .company-header { display: flex; justify-content: space-between; align-items: center; }
-.company-title  { display: flex; align-items: center; gap: 12px; }
+.company-title  { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.signal-pair    { display: inline-flex; align-items: center; gap: 6px; }
+.signal-label   { font-size: 12px; color: #888; font-weight: 500; }
 .back-btn {
   padding: 4px 6px;
   color: #606266;
