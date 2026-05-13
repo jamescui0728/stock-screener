@@ -25,28 +25,60 @@
         </div>
       </div>
 
-      <!-- 汇总信号统计（5 等级，flex grid 自适应）-->
-      <div class="signal-stat-grid">
-        <el-card class="signal-stat strong-buy-stat">
-          <div class="stat-num">{{ sigCounts.STRONG_BUY }}</div>
-          <div class="stat-lbl">⭐ 必买</div>
-        </el-card>
-        <el-card class="signal-stat buy-stat">
-          <div class="stat-num">{{ sigCounts.BUY }}</div>
-          <div class="stat-lbl">🟢 买入</div>
-        </el-card>
-        <el-card class="signal-stat hold-stat">
-          <div class="stat-num">{{ sigCounts.HOLD }}</div>
-          <div class="stat-lbl">🟡 持有</div>
-        </el-card>
-        <el-card class="signal-stat sell-stat">
-          <div class="stat-num">{{ sigCounts.SELL }}</div>
-          <div class="stat-lbl">🔴 卖出</div>
-        </el-card>
-        <el-card class="signal-stat strong-sell-stat">
-          <div class="stat-num">{{ sigCounts.STRONG_SELL }}</div>
-          <div class="stat-lbl">⚠️ 必卖</div>
-        </el-card>
+      <!-- 汇总信号统计：长期一行 + 短期一行 -->
+      <div class="signal-section">
+        <div class="signal-row-label">长期信号（基本面 + 估值，hold 6-12 月）</div>
+        <div class="signal-stat-grid">
+          <el-card class="signal-stat strong-buy-stat">
+            <div class="stat-num">{{ sigCounts.STRONG_BUY }}</div>
+            <div class="stat-lbl">⭐ 必买</div>
+          </el-card>
+          <el-card class="signal-stat buy-stat">
+            <div class="stat-num">{{ sigCounts.BUY }}</div>
+            <div class="stat-lbl">🟢 买入</div>
+          </el-card>
+          <el-card class="signal-stat hold-stat">
+            <div class="stat-num">{{ sigCounts.HOLD }}</div>
+            <div class="stat-lbl">🟡 持有</div>
+          </el-card>
+          <el-card class="signal-stat sell-stat">
+            <div class="stat-num">{{ sigCounts.SELL }}</div>
+            <div class="stat-lbl">🔴 卖出</div>
+          </el-card>
+          <el-card class="signal-stat strong-sell-stat">
+            <div class="stat-num">{{ sigCounts.STRONG_SELL }}</div>
+            <div class="stat-lbl">⚠️ 必卖</div>
+          </el-card>
+        </div>
+      </div>
+
+      <div class="signal-section">
+        <div class="signal-row-label">短期信号（动量 + 量价 + 宏观，hold 1-2 周）</div>
+        <div class="signal-stat-grid">
+          <el-card class="signal-stat strong-buy-stat">
+            <div class="stat-num">{{ shortSigCounts.STRONG_BUY }}</div>
+            <div class="stat-lbl">⭐ 必买</div>
+          </el-card>
+          <el-card class="signal-stat buy-stat">
+            <div class="stat-num">{{ shortSigCounts.BUY }}</div>
+            <div class="stat-lbl">🟢 买入</div>
+          </el-card>
+          <el-card class="signal-stat hold-stat">
+            <div class="stat-num">{{ shortSigCounts.HOLD }}</div>
+            <div class="stat-lbl">🟡 持有</div>
+          </el-card>
+          <el-card class="signal-stat sell-stat">
+            <div class="stat-num">{{ shortSigCounts.SELL }}</div>
+            <div class="stat-lbl">🔴 卖出</div>
+          </el-card>
+          <el-card class="signal-stat strong-sell-stat">
+            <div class="stat-num">{{ shortSigCounts.STRONG_SELL }}</div>
+            <div class="stat-lbl">⚠️ 必卖</div>
+          </el-card>
+        </div>
+        <div class="signal-row-hint" v-if="shortMissing > 0">
+          ⓘ 还有 {{ shortMissing }} 只无短期信号（价格数据不足或未刷新），点"更新数据"或后台触发短期信号刷新
+        </div>
       </div>
 
       <!-- ========== 最新消息 ========== -->
@@ -266,6 +298,19 @@ const sigCounts = computed(() => {
   return c
 })
 
+const shortSigCounts = computed(() => {
+  const c = { STRONG_BUY: 0, BUY: 0, HOLD: 0, SELL: 0, STRONG_SELL: 0 }
+  for (const s of stocks.value) {
+    if (s.short_signal && c[s.short_signal] !== undefined) c[s.short_signal]++
+  }
+  return c
+})
+
+// 没有短期信号的股票数（价格数据不足或未刷新）
+const shortMissing = computed(() =>
+  stocks.value.filter(s => !s.short_signal).length
+)
+
 async function load() {
   loading.value = true
   try { stocks.value = await watchlistApi.get() }
@@ -373,11 +418,26 @@ onMounted(async () => {
 .page-title { font-size: 20px; font-weight: 700; color: #1f2328; }
 .top-actions { display: flex; align-items: center; gap: 12px; }
 
+.signal-section {
+  margin-bottom: 16px;
+}
+.signal-row-label {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 6px;
+  padding-left: 2px;
+  font-weight: 500;
+}
+.signal-row-hint {
+  font-size: 11px;
+  color: #b0b0b0;
+  margin-top: 4px;
+  padding-left: 2px;
+}
 .signal-stat-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 20px;
 }
 .signal-stat {
   flex: 1 1 0;
