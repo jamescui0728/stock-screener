@@ -76,26 +76,40 @@ class Settings(BaseSettings):
     FIN_MACRO_MIN_SCORE: float = 65.0
 
     # ═══════════════════════════════════════════════════════════
-    # 短期信号系统（v200 新增）
+    # 短期信号系统（v201：反转模型）
     # ═══════════════════════════════════════════════════════════
-    # 与长期信号并行：长期看"能不能赚钱"，短期看"现在涨不涨"。
-    # 5 维度（独立于长期）：
-    #   动量 35% + 量价 15% + 宏观 25% + 科技板块 15% + 新闻热度 10%
+    # v200 是"追涨"模型，回测 IC=-0.114（评分越高表现越差）→ v201 翻转方向：
+    #   - momentum / volprice 翻转：跌且超卖加分，涨且过热扣分
+    #   - news_heat 权重清零（回测时新闻数据稀疏，恒为 50）
+    #   - macro 是诊断里唯一正 IC 的维度（BUY 子集 +0.116）→ 大幅加权
+    #   - tech 板块降权（贡献微弱）
     # 持有周期假设：1-2 周（短线波段），非长期持有
-    SHORT_MOMENTUM_WEIGHT:  float = 0.35   # 价格动量 (5/20/60 日收益、MA20/60、RSI)
-    SHORT_VOLPRICE_WEIGHT:  float = 0.15   # 量价关系 (涨幅 × 量比)
-    SHORT_MACRO_WEIGHT:     float = 0.25   # 宏观环境 (复用 score_macro)
-    SHORT_TECH_WEIGHT:      float = 0.15   # 科技 / 政策板块
-    SHORT_NEWS_HEAT_WEIGHT: float = 0.10   # 新闻热度 + 情感
-    # 总和必须 = 1.0（启动时校验，否则评分会失真）
+    # v203 实验结果：在当前 raw scoring（已精调过的非线性奖励）+ 高度共线因子的
+    # 场景下，cross-sectional ranking 反而把 IC 从 0.108 降到 0.069，桶 5 超额
+    # 从 +1.56% 降到 +0.92%。原因：把"极端事件给极端分"的量子信号拉平到均匀分布，
+    # 丢失了 alpha 来源。框架代码保留，default 关掉。
+    # 未来若加入正交因子（盈利惊喜 / 内幕交易 / 期权偏度等）可重新打开。
+    SHORT_USE_CROSS_SECTIONAL_RANKS: bool = False
 
-    # 短期 5 等级阈值（与长期信号阈值独立）
-    SHORT_STRONG_BUY_THRESHOLD:  float = 75.0
-    SHORT_BUY_THRESHOLD:         float = 60.0
-    SHORT_SELL_THRESHOLD:        float = 45.0
-    SHORT_STRONG_SELL_THRESHOLD: float = 30.0
-    # 触发必卖的硬条件：近 5 日跌幅 > 10%
-    SHORT_HARD_SELL_5D_DROP: float = -0.10
+    # v202b 生产配置（IC=+0.108, win=50.4%）
+    SHORT_MOMENTUM_WEIGHT:           float = 0.00
+    SHORT_VOLPRICE_WEIGHT:           float = 0.40
+    SHORT_MACRO_WEIGHT:              float = 0.30
+    SHORT_TECH_WEIGHT:               float = 0.10
+    SHORT_NEWS_HEAT_WEIGHT:          float = 0.00
+    SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.20
+    # 总和必须 = 1.0
+
+    # v202d 阈值（目标 BUY 胜率 ≥ 75%）：
+    # 基于 run 56 (15d cycle) 的更细精度分析：
+    #   composite ≥ 70 → 胜率 76.7%（n=176，平均超额 +6.13%）
+    #   composite ≥ 71 → 胜率 88.2%（n=68， 平均超额 +10.11%，"高确信度名单"）
+    # 注意：信号变非常稀疏（约 70 个 BUY/年，27 个 STRONG_BUY/年），
+    # 用户需要等待真正的高分共振机会
+    SHORT_STRONG_BUY_THRESHOLD:  float = 71.0
+    SHORT_BUY_THRESHOLD:         float = 70.0
+    SHORT_SELL_THRESHOLD:        float = 38.0
+    SHORT_STRONG_SELL_THRESHOLD: float = 28.0
 
     # 科技 / 政策催化白名单（行业代码用 BK 前缀，对应 industries 表）
     # 这些行业获得短期"科技板块"满分基础，再叠加行业评分
@@ -118,8 +132,20 @@ class Settings(BaseSettings):
     BACKTEST_START_YEAR:  int = 2014
     BACKTEST_TRAIN_YEARS: int = 5
     BACKTEST_VAL_YEARS:   int = 2
-    HOLD_MONTHS:          int = 12
+    HOLD_MONTHS:          int = 12   # 历史字段，仅旧路径兜底用
     REPORT_LAG_DAYS:      int = 90
+
+    # v200：长/短期回测的持有 + 检查频率（统一以 days 计）
+    BACKTEST_HOLD_DAYS_LONG:        int = 365   # 长期：约 12 个月
+    BACKTEST_HOLD_DAYS_SHORT:       int = 15    # 短期：3 周内自然交易周期
+    BACKTEST_CHECK_FREQ_DAYS_LONG:  int = 90    # 长期：季度检查
+    BACKTEST_CHECK_FREQ_DAYS_SHORT: int = 15    # 与持有期对齐，回测样本独立（避免持仓重叠）
+
+    # 短期回测的滚动窗口默认值（与长期独立）：
+    # 长期默认 train=5/val=2（共 7 年）— 因为短期数据从 2022 起，套用这套会得到 0 窗口。
+    # 短期默认 train=1.5/val=0.5（共 2 年），从 today-4y 起算可得到 ~3 个窗口。
+    BACKTEST_TRAIN_YEARS_SHORT: float = 1.5
+    BACKTEST_VAL_YEARS_SHORT:   float = 0.5
 
     # 回测优化目标
     OPT_W_WIN_RATE: float = 0.50
@@ -162,6 +188,33 @@ def _apply_overrides():
 _apply_overrides()
 
 
+def _validate_weights():
+    """启动时校验权重总和 = 1.0，避免评分数值失真"""
+    import logging
+    logger = logging.getLogger(__name__)
+    long_sum = (
+        settings.FUNDAMENTAL_WEIGHT +
+        settings.VALUATION_WEIGHT +
+        settings.SENTIMENT_WEIGHT +
+        settings.MACRO_WEIGHT
+    )
+    if abs(long_sum - 1.0) > 0.001:
+        logger.warning(f"长期信号权重总和 = {long_sum:.3f} ≠ 1.0，请检查配置")
+    short_sum = (
+        settings.SHORT_MOMENTUM_WEIGHT +
+        settings.SHORT_VOLPRICE_WEIGHT +
+        settings.SHORT_MACRO_WEIGHT +
+        settings.SHORT_TECH_WEIGHT +
+        settings.SHORT_NEWS_HEAT_WEIGHT +
+        settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
+    )
+    if abs(short_sum - 1.0) > 0.001:
+        logger.warning(f"短期信号权重总和 = {short_sum:.3f} ≠ 1.0，请检查配置")
+
+
+_validate_weights()
+
+
 def get_settings_dict() -> dict:
     """返回当前所有可配置参数（排除内部字段）"""
     exclude = {"DATABASE_URL", "DATA_UPDATE_INTERVAL_HOURS", "AKSHARE_TIMEOUT"}
@@ -194,4 +247,5 @@ def save_settings(updates: dict) -> dict:
             pass
 
     _OVERRIDE_FILE.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    _validate_weights()
     return get_settings_dict()

@@ -99,6 +99,20 @@
 
     <!-- ══════════════════ 主内容 ══════════════════ -->
 
+    <!-- 长/短期切换 Tab -->
+    <el-tabs v-model="signalType" class="signal-tabs" @tab-change="onSignalTypeChange">
+      <el-tab-pane label="长期回测" name="long">
+        <template #label>
+          <span class="tab-label">📈 长期回测<span class="tab-hint">基本面 / 6-12月</span></span>
+        </template>
+      </el-tab-pane>
+      <el-tab-pane label="短期回测" name="short">
+        <template #label>
+          <span class="tab-label">⚡ 短期回测<span class="tab-hint">动量 / 1-2周</span></span>
+        </template>
+      </el-tab-pane>
+    </el-tabs>
+
     <!-- 价格数据缺失警告 -->
     <el-alert
       v-if="priceCount === 0"
@@ -128,14 +142,22 @@
       <el-col :span="7">
         <!-- 启动回测 -->
         <el-card class="ctrl-card">
-          <template #header>启动新回测</template>
+          <template #header>
+            启动新{{ signalType === 'short' ? '短期' : '长期' }}回测
+          </template>
           <el-form :model="runForm" label-width="90px" size="small">
             <el-form-item label="描述">
               <el-input v-model="runForm.description" placeholder="本次回测备注" />
             </el-form-item>
             <el-form-item label="样本股票数">
-              <el-input-number v-model="runForm.sampleSize" :min="10" :max="500" />
+              <el-input-number v-model="runForm.sampleSize" :min="0" :max="500" />
               <div class="form-hint">越少速度越快，用于调试；0=全量</div>
+            </el-form-item>
+            <el-form-item label="持有天数">
+              <el-input-number v-model="runForm.holdDays" :min="3" :max="730" />
+              <div class="form-hint">
+                {{ signalType === 'short' ? '短线 15 天起；与回测样本独立性对齐（避免持仓重叠）' : '长线 365 天起；过短会牺牲 alpha' }}
+              </div>
             </el-form-item>
             <el-button
               type="primary" style="width:100%"
@@ -174,12 +196,20 @@
             <div class="form-hint" style="margin-bottom:8px">
               预计耗时 ≈ {{ (optForm.n_iter + optForm.init_points) * 3 }} 分钟
             </div>
-            <el-button
-              type="warning" style="width:100%"
-              :loading="optimizing" @click="startOptimize"
+            <el-tooltip
+              :disabled="signalType !== 'short'"
+              content="短期信号引擎暂不支持参数覆盖，仅长期回测可参数优化"
+              placement="top"
             >
-              {{ optimizing ? '优化运行中...' : '⚡ 启动参数优化' }}
-            </el-button>
+              <el-button
+                type="warning" style="width:100%"
+                :loading="optimizing"
+                :disabled="signalType === 'short'"
+                @click="startOptimize"
+              >
+                {{ optimizing ? '优化运行中...' : '⚡ 启动参数优化' }}
+              </el-button>
+            </el-tooltip>
           </el-form>
         </el-card>
 
@@ -366,8 +396,21 @@ const fetchingPrices = ref(false)
 let   priceTimer     = null
 let   priceStopTimer = null
 
-const runForm = ref({ description: '', sampleSize: 50 })
+// 当前 Tab：long / short — 影响表单默认值、API 过滤、维度映射
+const signalType = ref('long')
+
+const runForm = ref({ description: '', sampleSize: 50, holdDays: 365 })
 const optForm = ref({ n_iter: 20, init_points: 5 })
+
+// 切换 tab：重置表单默认值 + 重新拉对应类型的版本列表
+function onSignalTypeChange(name) {
+  // 切换时，hold_days 默认值跟 tab 走
+  runForm.value.holdDays = name === 'short' ? 15 : 365
+  // 清空当前报告（属于另一类型的）
+  report.value = null
+  selectedRunId.value = null
+  loadRuns()
+}
 
 // ── 进度数据 ──
 const prog = ref({
@@ -431,6 +474,8 @@ async function startRun() {
     await backtestApi.run({
       description:  runForm.value.description,
       sample_codes: null,
+      signal_type:  signalType.value,
+      params:       { hold_days: runForm.value.holdDays },
     })
 
     // 订阅 SSE 进度
@@ -462,6 +507,7 @@ async function startOptimize() {
       n_iter:       optForm.value.n_iter,
       init_points:  optForm.value.init_points,
       sample_codes: null,
+      signal_type:  signalType.value,
     })
     ElMessage.success('参数优化已启动（后台运行），完成后刷新版本列表')
   } finally {
@@ -490,14 +536,15 @@ async function onProgressDone() {
 async function loadRuns() {
   loadingRuns.value = true
   try {
-    const all = await backtestApi.list()
-    // 按时间降序，最新在前；只保留最近 2 个版本
+    // 按当前 tab 的 signalType 过滤；后端再做一次保险过滤
+    const all = await backtestApi.list(signalType.value)
     const sorted = [...all].sort((a, b) => {
       const ta = new Date(a.run_at || 0).getTime()
       const tb = new Date(b.run_at || 0).getTime()
       if (tb !== ta) return tb - ta
       return (b.run_id || 0) - (a.run_id || 0)
     })
+    // 只保留最近 2 个版本（保持原有简洁版本卡）
     runs.value = sorted.slice(0, 2)
   }
   finally { loadingRuns.value = false }
@@ -531,15 +578,31 @@ const winRateProgressColor = computed(() => {
   return r >= 85 ? '#67c23a' : r >= 70 ? '#e6a23c' : '#f56c6c'
 })
 
+// 维度标签 + 改进建议按当前 tab 切换
+const dimLabels = computed(() => (signalType.value === 'short'
+  ? { momentum:'动量', volprice:'量价', macro:'宏观', tech:'科技板块', news_heat:'新闻热度', industry_relative:'行业相对' }
+  : { fundamental:'基本面', valuation:'估值', sentiment:'舆情', macro:'宏观' }
+))
+
 const improveSuggestion = computed(() => {
   if (!report.value) return ''
   const top = report.value.false_buy_patterns?.[0]?.pattern
-  return {
+  const longMap = {
     fundamental: '加强基本面门槛（ROE/现金流要求）',
     valuation:   '收紧估值准入（降低 PE 分位上限）',
     sentiment:   '增加舆情权重或提高负面事件敏感度',
     macro:       '加入更多宏观指标，规避政策逆风期',
-  }[top] ?? '运行参数优化器自动调整'
+  }
+  const shortMap = {
+    momentum:  '收紧动量门槛（要求 5/20 日同时为正、站上 MA20）',
+    volprice:  '量价共振过滤：只在放量上涨时入场',
+    macro:     '宏观逆风期不发短期买入',
+    tech:      '降低非科技板块的入场权重',
+    news_heat: '过滤无新闻的冷门标的或负面消息密集股',
+    industry_relative: '收紧行业相对反转门槛（要求跑输行业幅度 >3%）',
+  }
+  const map = signalType.value === 'short' ? shortMap : longMap
+  return map[top] ?? '调整对应维度的权重或阈值'
 })
 
 // ── 图表配置 ──
@@ -569,7 +632,7 @@ const windowChartOption = computed(() => {
 const falseBuyPieOption = computed(() => {
   if (!report.value) return {}
   const patterns = report.value.false_buy_patterns || []
-  const dimMap = { fundamental: '基本面', valuation: '估值', sentiment: '舆情', macro: '宏观' }
+  const dimMap = dimLabels.value
   return {
     tooltip: { trigger: 'item', formatter: '{b}: {c}次 ({d}%)' },
     legend: { bottom: 0, fontSize: 11 },
@@ -606,9 +669,9 @@ function fmtNum(v, d=2){ return v != null ? v.toFixed(d) : '-' }
 function winRateClass(v){ return (v||0)>=85?'green':(v||0)>=70?'orange':'red' }
 function weakestDim(sub) {
   if (!sub) return '-'
-  const dims = { fundamental:'基本面', valuation:'估值', sentiment:'舆情', macro:'宏观' }
+  const dims = dimLabels.value
   return Object.entries(dims)
-    .map(([k, label]) => ({ label, val: sub[k] || 0 }))
+    .map(([k, label]) => ({ label, val: sub[k] ?? 0 }))
     .sort((a,b) => a.val - b.val)[0]?.label ?? '-'
 }
 
@@ -658,6 +721,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* ── 长/短期切换 ── */
+.signal-tabs { margin-bottom: 12px; }
+.tab-label    { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
+.tab-hint     { font-size: 11px; color: #999; }
+
 /* ── 控制面板 ── */
 .ctrl-card    { }
 .card-header  { display:flex; align-items:center; gap:6px; }

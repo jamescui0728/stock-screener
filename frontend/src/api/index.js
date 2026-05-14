@@ -68,11 +68,12 @@ export const watchlistApi = {
 
 // ── 回测 ──
 export const backtestApi = {
-  run:      (body)   => http.post('/backtest/run', body),
-  list:     ()       => http.get('/backtest/runs'),
-  report:   (runId)  => http.get(`/backtest/runs/${runId}`),
-  optimize: (body)   => http.post('/backtest/optimize', body),
-  snapshot: ()       => http.get('/backtest/progress/snapshot'),
+  run:      (body)              => http.post('/backtest/run', body),
+  // signalType: 'long' / 'short' / undefined（全部）
+  list:     (signalType)        => http.get('/backtest/runs', { params: signalType ? { signal_type: signalType } : {} }),
+  report:   (runId)             => http.get(`/backtest/runs/${runId}`),
+  optimize: (body)              => http.post('/backtest/optimize', body),
+  snapshot: ()                  => http.get('/backtest/progress/snapshot'),
 
   /**
    * 订阅 SSE 进度流

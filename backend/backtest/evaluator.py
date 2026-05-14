@@ -32,6 +32,7 @@ def get_run_report(db: Session, run_id: int) -> Optional[dict]:
     return {
         "run_id":          run.id,
         "version":         run.version,
+        "signal_type":     run.signal_type or "long",
         "run_at":          str(run.run_at),
         "description":     run.description,
         "params":          run.params,
@@ -57,13 +58,17 @@ def get_run_report(db: Session, run_id: int) -> Optional[dict]:
     }
 
 
-def compare_runs(db: Session) -> list:
-    """列出所有回测版本的对比摘要"""
-    runs = db.query(BacktestRun).order_by(BacktestRun.version).all()
+def compare_runs(db: Session, signal_type: Optional[str] = None) -> list:
+    """列出所有回测版本的对比摘要。signal_type 传 'long' / 'short' 可过滤。"""
+    q = db.query(BacktestRun)
+    if signal_type:
+        q = q.filter(BacktestRun.signal_type == signal_type)
+    runs = q.order_by(BacktestRun.version).all()
     return [
         {
             "run_id":          r.id,
             "version":         r.version,
+            "signal_type":     r.signal_type or "long",
             "run_at":          str(r.run_at),
             "win_rate":        r.win_rate,
             "ic_mean":         r.ic_mean,

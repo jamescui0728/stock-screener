@@ -433,6 +433,7 @@ class BacktestRequest(BaseModel):
     params: Optional[dict] = None
     description: Optional[str] = ""
     sample_codes: Optional[list] = None
+    signal_type: Optional[str] = "long"   # long / short
 
 
 @router.post("/backtest/run")
@@ -442,7 +443,17 @@ def start_backtest(
     db: Session = Depends(get_db),
 ):
     """启动一次回测（后台执行）"""
-    latest = db.query(BacktestRun).order_by(BacktestRun.version.desc()).first()
+    signal_type = (body.signal_type or "long").lower()
+    if signal_type not in ("long", "short"):
+        raise HTTPException(400, f"signal_type 仅支持 long / short，收到 {body.signal_type!r}")
+
+    # 版本号按 signal_type 独立编号：长期 / 短期各自一条递增序列
+    latest = (
+        db.query(BacktestRun)
+        .filter_by(signal_type=signal_type)
+        .order_by(BacktestRun.version.desc())
+        .first()
+    )
     next_version = (latest.version + 1) if latest else 1
 
     def _run():
@@ -451,15 +462,20 @@ def start_backtest(
             description=body.description,
             version=next_version,
             sample_codes=body.sample_codes,
+            signal_type=signal_type,
         )
 
     background_tasks.add_task(_run)
-    return {"message": f"回测 v{next_version} 已启动，稍后查询结果"}
+    label = "短期" if signal_type == "short" else "长期"
+    return {"message": f"{label}回测 v{next_version} 已启动，稍后查询结果"}
 
 
 @router.get("/backtest/runs")
-def list_backtest_runs(db: Session = Depends(get_db)):
-    return compare_runs(db)
+def list_backtest_runs(
+    signal_type: Optional[str] = Query(None, description="筛选 long / short；不传则返回全部"),
+    db: Session = Depends(get_db),
+):
+    return compare_runs(db, signal_type=signal_type)
 
 
 @router.get("/backtest/runs/{run_id}")
@@ -474,6 +490,7 @@ class OptimizeRequest(BaseModel):
     n_iter: int = 20
     init_points: int = 5
     sample_codes: Optional[list] = None
+    signal_type: Optional[str] = "long"   # 当前仅支持 long；short 会返回 400
 
 
 @router.get("/backtest/progress")
@@ -519,7 +536,17 @@ def start_optimization(
     db: Session = Depends(get_db),
 ):
     """启动贝叶斯参数优化（后台执行）"""
-    latest = db.query(BacktestRun).order_by(BacktestRun.version.desc()).first()
+    signal_type = (body.signal_type or "long").lower()
+    if signal_type != "long":
+        # 短期信号引擎不支持 params 覆盖，因此参数优化目前仅作用于长期信号
+        raise HTTPException(400, "参数优化暂仅支持长期信号；短期信号请用手动回测")
+
+    latest = (
+        db.query(BacktestRun)
+        .filter_by(signal_type=signal_type)
+        .order_by(BacktestRun.version.desc())
+        .first()
+    )
     version_offset = (latest.version + 1) if latest else 1
 
     background_tasks.add_task(

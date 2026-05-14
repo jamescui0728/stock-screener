@@ -20,7 +20,8 @@
   composite < 30 或 5日跌幅 > 10%  →  STRONG_SELL
 """
 import logging
-from datetime import datetime, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -78,35 +79,41 @@ def score_momentum(db: Session, stock_code: str, as_of_date=None) -> Optional[di
     # RSI(14)
     rsi14 = _calc_rsi(closes, period=14)
 
-    # ── 评分（0-100，部分项权重内）──
-    score = 50.0   # 中性基准
+    # ── 评分（v201：翻转为短期反转模型）──
+    # 诊断（run 45, n=105k）：原"追涨"模型 IC=-0.114，最高分桶 win 仅 39.8%
+    # A 股短期典型反转：涨多回吐，跌多反弹。把方向翻过来：
+    #   涨多 → 扣分；跌多 → 加分（小幅）；RSI 超卖 → 大加分；过热 → 大扣分
+    # 保留 60 日趋势的正向（中期动量仍有效；只翻 5/20 日的短期项）
+    score = 50.0
 
-    # 5 日收益：±10% → ±15 分
+    # 5 日收益：翻转（涨多扣分，跌多加分）±10% → ∓12 分
     if ret_5d is not None:
-        score += max(-15, min(15, ret_5d * 150))   # +1% → +1.5 分
+        score -= max(-12, min(12, ret_5d * 120))
 
-    # 20 日收益：±20% → ±15 分
+    # 20 日收益：翻转，±20% → ∓10 分（短期反转，但权重小一些）
     if ret_20d is not None:
-        score += max(-15, min(15, ret_20d * 75))
+        score -= max(-10, min(10, ret_20d * 50))
 
-    # 60 日收益：±30% → ±10 分（长一点的趋势）
+    # 60 日收益：保持正向，±30% → ±10 分
+    # （A 股的中期动量 60d 仍 weakly positive；只翻 5/20d 的短期反转项）
     if ret_60d is not None:
         score += max(-10, min(10, ret_60d * 33))
 
-    # 站上 MA20：+5；MA60：+5
-    if above_ma20:
-        score += 5
-    if above_ma60:
-        score += 5
+    # MA20/MA60：移除（IC 分析里这两项贡献已并入收益项，再加分会双重计算）
 
-    # RSI 健康区间（40-65）：+5；过热（>75）：-5；超卖反弹（<30）：+3
+    # RSI：放大反转效应
+    #   超卖 (<30) → +15  （原 +3，黄金回调机会）
+    #   过热 (>70) → -10  （原 >75 时 -5；放宽阈值并加大力度）
+    #   中性区不加减分
     if rsi14 is not None:
-        if 40 <= rsi14 <= 65:
+        if rsi14 < 30:
+            score += 15
+        elif rsi14 < 40:
             score += 5
-        elif rsi14 > 75:
-            score -= 5
-        elif rsi14 < 30:
-            score += 3
+        elif rsi14 > 70:
+            score -= 10
+        elif rsi14 > 60:
+            score -= 3
 
     return {
         "score":      round(max(0, min(100, score)), 2),
@@ -141,10 +148,11 @@ def _calc_rsi(closes: list, period: int = 14) -> Optional[float]:
 # ════════════════════════════════════════════════════════════════
 def score_volprice(db: Session, stock_code: str, as_of_date=None) -> Optional[dict]:
     """
-    涨且放量 → 正面（资金入场）
-    跌且放量 → 负面（恐慌出逃）
-    涨且缩量 → 中性偏弱（散户拉抬，不稳）
-    跌且缩量 → 中性偏强（抛压减弱）
+    v201：翻转为反转量价（诊断 IC=-0.122，最强反向项）
+    涨且放量 → 分布形态（顶部资金出货），扣分
+    跌且放量 → 恐慌底，加分
+    涨且缩量 → 上涨乏力，扣分
+    跌且缩量 → 抛压减弱，加分
     """
     cutoff = as_of_date or datetime.utcnow().date()
     rows = (
@@ -169,22 +177,22 @@ def score_volprice(db: Session, stock_code: str, as_of_date=None) -> Optional[di
     # 近 5 日涨幅
     ret_5d = closes[-1] / closes[-6] - 1 if len(closes) >= 6 else 0
 
-    # 评分逻辑
+    # v201 翻转评分逻辑（短期反转）
     score = 50.0
     if ret_5d > 0.02:        # 明显涨
-        if vol_ratio > 1.3:  # 涨且放量
-            score = 75 + min(15, (vol_ratio - 1.3) * 30)
-        elif vol_ratio > 0.9:
-            score = 55
-        else:                # 涨但缩量
-            score = 45
-    elif ret_5d < -0.02:     # 明显跌
-        if vol_ratio > 1.3:  # 跌且放量 = 恐慌
+        if vol_ratio > 1.3:  # 涨且放量 = 分布形态 → 扣分
             score = 25 - min(15, (vol_ratio - 1.3) * 30)
-        elif vol_ratio < 0.8:# 跌且缩量 = 抛压减弱
-            score = 50
-        else:
+        elif vol_ratio > 0.9:
+            score = 40
+        else:                # 涨但缩量 = 上涨乏力 → 也扣分
             score = 35
+    elif ret_5d < -0.02:     # 明显跌
+        if vol_ratio > 1.3:  # 跌且放量 = 恐慌底 → 加分
+            score = 75 + min(15, (vol_ratio - 1.3) * 30)
+        elif vol_ratio < 0.8:# 跌且缩量 = 抛压减弱 → 加分
+            score = 65
+        else:
+            score = 60
     # else: 横盘（±2% 内）→ 维持 50
 
     return {
@@ -215,32 +223,174 @@ def score_tech_sector(
     if not stock or not stock.industry_code:
         return {"score": 30.0, "is_tech": False}
 
-    is_tech = stock.industry_code in settings.TECH_INDUSTRIES
-    base = 70.0 if is_tech else 30.0
-
-    # 叠加行业评分
+    # v201：去掉白名单 base bonus（诊断显示 tech bonus 是负 IC），
+    # 直接用行业评分线性映射到 0-100
     if _cached_industries is not None:
         ind = _cached_industries.get(stock.industry_code)
     else:
         ind = db.query(Industry).filter_by(code=stock.industry_code).first()
     ind_score = (ind.total_score or 50.0) if ind else 50.0
 
-    if is_tech:
-        # 白名单内：行业评分 >= 60 满分；< 60 线性衰减
-        bonus = max(0, min(30, (ind_score - 50) * 1.5))
-    else:
-        # 白名单外：行业评分 >= 70 才加分
-        bonus = max(0, min(20, (ind_score - 60) * 1.0))
+    # 行业评分（通常 0-100 范围）直接当作 tech score；
+    # 不再"科技板块 +40 起步"——那是 v200 的负 IC 主因
+    is_tech = stock.industry_code in settings.TECH_INDUSTRIES
 
     return {
-        "score":     round(base + bonus, 2),
+        "score":     round(ind_score, 2),
         "is_tech":   is_tech,
         "ind_score": round(ind_score, 2),
     }
 
 
 # ════════════════════════════════════════════════════════════════
-# 4. 新闻热度评分（0-100）
+# 4. 行业相对反转评分（v202 新增）
+# ════════════════════════════════════════════════════════════════
+def compute_industry_returns_at(db: Session, as_of_date=None) -> dict:
+    """
+    一次 bulk query 算出每个行业在 as_of_date 的平均 5/20 日涨幅。
+
+    返回 {industry_code: {'ret_5d': float, 'ret_20d': float, 'n_stocks': int}}
+    （只保留 n_stocks >= 3 的行业，单只样本无意义）
+
+    性能：拉所有 active 股票 + 最近 35 天价格 → 一次扫表，Python 里聚合
+    在批量场景（generate_all_short_signals / 回测 _run_window）调用一次即可
+    """
+    cutoff = as_of_date or datetime.utcnow().date()
+    # 45 个自然日 ~ 30 个交易日，够算 20 日动量（含节假日 + 部分股票滞后）
+    start  = cutoff - timedelta(days=45)
+
+    # 拉股票 → 行业映射
+    stock_industry = dict(
+        db.query(Stock.code, Stock.industry_code)
+        .filter(Stock.is_active == True, Stock.industry_code.isnot(None))
+        .all()
+    )
+    if not stock_industry:
+        return {}
+
+    # 一次拉所有 (code, date, close) — 仅按日期范围过滤
+    # （IN clause 5000+ 参数会让 SQLite 一秒变 30 秒，所以把过滤放 Python 里）
+    rows = (
+        db.query(PriceData.stock_code, PriceData.trade_date, PriceData.close)
+        .filter(
+            PriceData.trade_date >= start,
+            PriceData.trade_date <= cutoff,
+        )
+        .all()
+    )
+
+    # 按股票分组（保留时间顺序），只保留 active + 有 industry_code 的
+    by_stock = defaultdict(list)
+    for code, dt, close in rows:
+        if close is not None and code in stock_industry:
+            by_stock[code].append((dt, close))
+
+    # 每只算自身 5/20 日收益，加进所在行业的 bucket
+    ind_buckets = defaultdict(list)
+    for code, prices in by_stock.items():
+        ind_code = stock_industry.get(code)
+        if not ind_code:
+            continue
+        if len(prices) < 21:
+            continue
+        prices.sort(key=lambda x: x[0])
+        cur = prices[-1][1]
+        if cur is None or cur <= 0:
+            continue
+        try:
+            ret_5d  = cur / prices[-6][1]  - 1
+            ret_20d = cur / prices[-21][1] - 1
+        except (ZeroDivisionError, TypeError):
+            continue
+        ind_buckets[ind_code].append((ret_5d, ret_20d))
+
+    # 每个行业做均值，至少 3 只才入结果（避免单 outlier 主导）
+    result = {}
+    for ind_code, lst in ind_buckets.items():
+        if len(lst) < 3:
+            continue
+        avg_5d  = sum(r[0] for r in lst) / len(lst)
+        avg_20d = sum(r[1] for r in lst) / len(lst)
+        result[ind_code] = {
+            "ret_5d":   avg_5d,
+            "ret_20d":  avg_20d,
+            "n_stocks": len(lst),
+        }
+    return result
+
+
+def score_industry_relative(
+    db: Session, stock_code: str, as_of_date=None,
+    _cached_stock: Optional[Stock] = None,
+    _cached_industry_returns: Optional[dict] = None,
+    _cached_stock_returns: Optional[dict] = None,
+) -> dict:
+    """
+    行业相对反转评分（0-100）：
+    - 跑输行业越多 → 越超卖 → 反弹候选 → 加分
+    - 跑赢行业越多 → 涨过头 → 回调风险 → 扣分
+
+    实证依据：A 股个股相对于同行业的 short-term mean reversion 效应明显，
+    且比纯绝对收益的反转信号更稳健（剥离了系统性 + 行业 beta）
+
+    _cached_industry_returns: 由 compute_industry_returns_at 预算的 dict
+    _cached_stock_returns: 可选，{code: (ret_5d, ret_20d)} 避免重复查询
+    """
+    if not _cached_industry_returns:
+        # 没缓存就单只算 — 慢，但单只调用时可接受
+        _cached_industry_returns = compute_industry_returns_at(db, as_of_date)
+
+    stock = _cached_stock if _cached_stock is not None else \
+            db.query(Stock).filter_by(code=stock_code).first()
+    if not stock or not stock.industry_code:
+        return {"score": 50.0, "rel_5d": None, "rel_20d": None}
+
+    ind = _cached_industry_returns.get(stock.industry_code)
+    if not ind:
+        return {"score": 50.0, "rel_5d": None, "rel_20d": None}
+
+    # 个股自身的 5/20 日收益（优先用 cache，否则单查）
+    if _cached_stock_returns and stock_code in _cached_stock_returns:
+        ret_5d, ret_20d = _cached_stock_returns[stock_code]
+    else:
+        cutoff = as_of_date or datetime.utcnow().date()
+        rows = (
+            db.query(PriceData)
+            .filter(PriceData.stock_code == stock_code, PriceData.trade_date <= cutoff)
+            .order_by(desc(PriceData.trade_date))
+            .limit(25)
+            .all()
+        )
+        if len(rows) < 21:
+            return {"score": 50.0, "rel_5d": None, "rel_20d": None}
+        closes = [r.close for r in reversed(rows) if r.close]
+        if len(closes) < 21:
+            return {"score": 50.0, "rel_5d": None, "rel_20d": None}
+        try:
+            ret_5d  = closes[-1] / closes[-6]  - 1
+            ret_20d = closes[-1] / closes[-21] - 1
+        except (ZeroDivisionError, TypeError):
+            return {"score": 50.0, "rel_5d": None, "rel_20d": None}
+
+    rel_5d  = ret_5d  - ind["ret_5d"]    # 正 = 跑赢行业；负 = 跑输
+    rel_20d = ret_20d - ind["ret_20d"]
+
+    # 反转打分：跑赢扣分、跑输加分（饱和）
+    # 5d 维度：±5% rel → ±18 分（短周期权重大）
+    # 20d 维度：±15% rel → ±12 分
+    score = 50.0
+    score -= max(-18, min(18, rel_5d  * 360))
+    score -= max(-12, min(12, rel_20d * 80))
+
+    return {
+        "score":   round(max(0, min(100, score)), 2),
+        "rel_5d":  round(rel_5d  * 100, 2),
+        "rel_20d": round(rel_20d * 100, 2),
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# 5. 新闻热度评分（0-100）
 # ════════════════════════════════════════════════════════════════
 def score_news_heat(db: Session, stock_code: str, as_of_date=None) -> dict:
     """
@@ -293,6 +443,7 @@ def generate_short_signal(
     _cached_macro_100: Optional[float] = None,
     _cached_stock: Optional[Stock] = None,
     _cached_industries: Optional[dict] = None,
+    _cached_industry_returns: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -326,86 +477,78 @@ def generate_short_signal(
         _cached_industries=_cached_industries,
     )
     news_heat  = score_news_heat(db, stock_code, as_of_date)
+    ind_rel    = score_industry_relative(
+        db, stock_code, as_of_date,
+        _cached_stock=_cached_stock,
+        _cached_industry_returns=_cached_industry_returns,
+    )
 
-    # 加权综合分
+    # 加权综合分（v202：加入 industry_relative 第 6 维）
     composite = (
-        mom["score"]       * settings.SHORT_MOMENTUM_WEIGHT  +
-        vp["score"]        * settings.SHORT_VOLPRICE_WEIGHT  +
-        macro_100          * settings.SHORT_MACRO_WEIGHT     +
-        tech["score"]      * settings.SHORT_TECH_WEIGHT      +
-        news_heat["score"] * settings.SHORT_NEWS_HEAT_WEIGHT
+        mom["score"]       * settings.SHORT_MOMENTUM_WEIGHT          +
+        vp["score"]        * settings.SHORT_VOLPRICE_WEIGHT          +
+        macro_100          * settings.SHORT_MACRO_WEIGHT             +
+        tech["score"]      * settings.SHORT_TECH_WEIGHT              +
+        news_heat["score"] * settings.SHORT_NEWS_HEAT_WEIGHT         +
+        ind_rel["score"]   * settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
     )
     composite = round(max(0, min(100, composite)), 2)
 
-    # ── 5 等级判定 ──
-    hard_sell_drop = vp["ret_5d"] / 100   # ret_5d 已经是百分比
-    ret_5d_pct = mom.get("ret_5d") or 0   # 来自 momentum 的 5 日涨幅（百分比）
-    if hard_sell_drop < settings.SHORT_HARD_SELL_5D_DROP:
-        # 硬卖：5 日跌幅超过 -10%（默认）
-        signal = "STRONG_SELL"
-        reason = f"近 5 日跌幅 {vp['ret_5d']:.1f}%，触发硬卖（< {settings.SHORT_HARD_SELL_5D_DROP*100:.0f}%）"
-    elif composite >= settings.SHORT_STRONG_BUY_THRESHOLD and ret_5d_pct > 2.0:
-        # 必买：综合分够 + 5 日涨幅 > 2%（实质性动能，而非微涨）
+    # ── 5 等级判定（v201：反转模型）──
+    if composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
         signal = "STRONG_BUY"
-        reason = _build_short_reason("STRONG_BUY", composite, mom, vp, macro_100, tech, news_heat)
-    elif composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
-        # 综合分够但短期动能不足（5日涨幅 <= 2%）→ 降级为买入
-        signal = "BUY"
-        reason = _build_short_reason("BUY", composite, mom, vp, macro_100, tech, news_heat)
-        reason += "（注：综合分达 STRONG_BUY，但 5 日动能未确认，降级为 BUY）"
     elif composite >= settings.SHORT_BUY_THRESHOLD:
         signal = "BUY"
-        reason = _build_short_reason("BUY", composite, mom, vp, macro_100, tech, news_heat)
     elif composite >= settings.SHORT_SELL_THRESHOLD:
         signal = "HOLD"
-        reason = _build_short_reason("HOLD", composite, mom, vp, macro_100, tech, news_heat)
     elif composite >= settings.SHORT_STRONG_SELL_THRESHOLD:
         signal = "SELL"
-        reason = _build_short_reason("SELL", composite, mom, vp, macro_100, tech, news_heat)
     else:
         signal = "STRONG_SELL"
-        reason = _build_short_reason("STRONG_SELL", composite, mom, vp, macro_100, tech, news_heat)
+    reason = _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel)
 
     result = {
         "short_composite_score": composite,
         "short_signal":          signal,
         "short_signal_reason":   reason,
         "sub_scores": {
-            "momentum":  mom["score"],
-            "volprice":  vp["score"],
-            "macro":     round(macro_100, 2),
-            "tech":      tech["score"],
-            "news_heat": news_heat["score"],
+            "momentum":          mom["score"],
+            "volprice":          vp["score"],
+            "macro":             round(macro_100, 2),
+            "tech":              tech["score"],
+            "news_heat":         news_heat["score"],
+            "industry_relative": ind_rel["score"],
         },
         "details": {
-            "momentum":  mom,
-            "volprice":  vp,
-            "tech":      tech,
-            "news_heat": news_heat,
+            "momentum":          mom,
+            "volprice":          vp,
+            "tech":              tech,
+            "news_heat":         news_heat,
+            "industry_relative": ind_rel,
         },
     }
 
     if write_back:
-        # 复用 _cached_stock 避免额外查询
         stock = _cached_stock if _cached_stock is not None else \
                 db.query(Stock).filter_by(code=stock_code).first()
         if stock:
-            stock.short_composite_score = composite
-            stock.short_signal          = signal
-            stock.short_signal_reason   = reason
-            stock.short_signal_updated  = datetime.utcnow()
-            stock.short_score_momentum  = mom["score"]
-            stock.short_score_volprice  = vp["score"]
-            stock.short_score_macro     = round(macro_100, 2)
-            stock.short_score_tech      = tech["score"]
-            stock.short_score_news_heat = news_heat["score"]
+            stock.short_composite_score          = composite
+            stock.short_signal                   = signal
+            stock.short_signal_reason            = reason
+            stock.short_signal_updated           = datetime.utcnow()
+            stock.short_score_momentum           = mom["score"]
+            stock.short_score_volprice           = vp["score"]
+            stock.short_score_macro              = round(macro_100, 2)
+            stock.short_score_tech               = tech["score"]
+            stock.short_score_news_heat          = news_heat["score"]
+            stock.short_score_industry_relative  = ind_rel["score"]
             if commit:
                 db.commit()
 
     return result
 
 
-def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat) -> str:
+def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel=None) -> str:
     """生成中文 reason"""
     parts = [f"短期信号：综合分 {composite}"]
 
@@ -430,6 +573,17 @@ def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat) 
     else:
         parts.append(f"行业：非科技板块（评分 {tech['ind_score']}）")
 
+    # 行业相对（v202）
+    if ind_rel and ind_rel.get("rel_5d") is not None:
+        rel = ind_rel["rel_5d"]
+        if rel > 3:
+            label = f"跑赢行业 {rel:+.1f}%（涨过头）"
+        elif rel < -3:
+            label = f"跑输行业 {rel:+.1f}%（反转候选）"
+        else:
+            label = f"跟随行业 {rel:+.1f}%"
+        parts.append(f"行业相对：{label}")
+
     # 新闻热度
     if news_heat["n_news"] > 0:
         s = news_heat.get("avg_sentiment")
@@ -440,18 +594,144 @@ def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat) 
     else:
         parts.append("新闻：近 7 天无")
 
-    # 操作建议
+    # 操作建议（v201：反转模型）
     if signal == "STRONG_BUY":
-        parts.append("→ 强烈看涨（动量足 + 多重共振）")
+        parts.append("→ 强烈看涨（超卖反弹 + 宏观共振）")
     elif signal == "BUY":
-        parts.append("→ 短线看涨")
+        parts.append("→ 短线看涨（反转机会）")
     elif signal == "HOLD":
         parts.append("→ 观望")
     elif signal == "SELL":
-        parts.append("→ 短线回避 / 减仓")
+        parts.append("→ 短线回避（涨幅过快或宏观偏弱）")
     else:
-        parts.append("→ 强烈回避")
+        parts.append("→ 强烈回避（过热 + 宏观偏弱）")
 
+    return "。".join(parts) + "。"
+
+
+# ════════════════════════════════════════════════════════════════
+# 6.0 截面排名（v203）
+# ════════════════════════════════════════════════════════════════
+# 各维度的 raw 子分在全市场内 → percentile 0-100。
+# 思路：剥离市场整体涨跌（如全市场都涨 5%，绝对动量分都偏低，
+# 但相对排名仍清晰）。学术上 cross-sectional ranking 在 A 股短期最稳健。
+#
+# 注意：macro 在同一 check_date 对所有股票相同 → 不排名；
+# news_heat 大部分股票恒为 50 → 排名等于随机 → 不排名。
+
+# 参与排名的维度
+_RANKED_DIMS = ("momentum", "volprice", "tech", "industry_relative")
+
+
+def _apply_cross_sectional_ranks(results: dict) -> dict:
+    """
+    输入：{stock_code: signal_dict}（generate_short_signal 的输出）
+    操作：
+      1. 对 _RANKED_DIMS 的每个维度，把 sub_scores 转成跨股票百分位
+      2. 用 ranked 子分 + 原 macro/news_heat 重算 composite
+      3. 重新分级 signal
+      4. 原地更新 results
+    返回：results（已 mutated）
+    """
+    if not results:
+        return results
+
+    # Phase 1: per-dim 排名
+    ranks = {}  # stock_code → {dim: percentile_0_100}
+    for dim in _RANKED_DIMS:
+        # 提取所有 (code, raw) 对，跳过缺失值
+        pairs = [(code, r["sub_scores"][dim])
+                 for code, r in results.items()
+                 if r and r.get("sub_scores") and r["sub_scores"].get(dim) is not None]
+        if not pairs:
+            continue
+        # 按 raw 升序排序
+        pairs.sort(key=lambda x: x[1])
+        n = len(pairs)
+        # 同分处理：用平均 rank（避免单调跳）
+        for i, (code, _) in enumerate(pairs):
+            # (i + 0.5) / n × 100 → 范围约 0-99
+            pct = (i + 0.5) / n * 100
+            ranks.setdefault(code, {})[dim] = round(pct, 2)
+
+    # Phase 2: 用 percentile 重算 composite + signal
+    w_mom    = settings.SHORT_MOMENTUM_WEIGHT
+    w_vp     = settings.SHORT_VOLPRICE_WEIGHT
+    w_macro  = settings.SHORT_MACRO_WEIGHT
+    w_tech   = settings.SHORT_TECH_WEIGHT
+    w_news   = settings.SHORT_NEWS_HEAT_WEIGHT
+    w_indrel = settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
+
+    for code, result in results.items():
+        if not result:
+            continue
+        sub = result["sub_scores"]
+        r = ranks.get(code, {})
+
+        # 用 percentile（如有），fallback raw
+        mom_pct    = r.get("momentum",          sub.get("momentum")          or 50.0)
+        vp_pct     = r.get("volprice",          sub.get("volprice")          or 50.0)
+        tech_pct   = r.get("tech",              sub.get("tech")              or 50.0)
+        indrel_pct = r.get("industry_relative", sub.get("industry_relative") or 50.0)
+        # 这两维不排名
+        macro_raw  = sub.get("macro")     if sub.get("macro")     is not None else 50.0
+        news_raw   = sub.get("news_heat") if sub.get("news_heat") is not None else 50.0
+
+        composite = (
+            mom_pct    * w_mom    +
+            vp_pct     * w_vp     +
+            macro_raw  * w_macro  +
+            tech_pct   * w_tech   +
+            news_raw   * w_news   +
+            indrel_pct * w_indrel
+        )
+        composite = round(max(0, min(100, composite)), 2)
+
+        if composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
+            signal = "STRONG_BUY"
+        elif composite >= settings.SHORT_BUY_THRESHOLD:
+            signal = "BUY"
+        elif composite >= settings.SHORT_SELL_THRESHOLD:
+            signal = "HOLD"
+        elif composite >= settings.SHORT_STRONG_SELL_THRESHOLD:
+            signal = "SELL"
+        else:
+            signal = "STRONG_SELL"
+
+        # 更新 sub_scores 为 ranked 形式（便于诊断脚本直接读）
+        result["sub_scores"] = {
+            "momentum":          round(mom_pct, 2),
+            "volprice":          round(vp_pct, 2),
+            "macro":             round(macro_raw, 2),
+            "tech":              round(tech_pct, 2),
+            "news_heat":         round(news_raw, 2),
+            "industry_relative": round(indrel_pct, 2),
+        }
+        result["short_composite_score"] = composite
+        result["short_signal"]          = signal
+        # reason 用排名后的视角重写（简版，避免误导）
+        result["short_signal_reason"]   = _build_ranked_reason(signal, composite, result["sub_scores"])
+
+    return results
+
+
+def _build_ranked_reason(signal, composite, sub) -> str:
+    parts = [f"短期信号（截面排名）：综合分 {composite}"]
+    def _label(name, v):
+        if v >= 80:  return f"{name}前 20%"
+        if v >= 60:  return f"{name}前 40%"
+        if v >= 40:  return f"{name}中游"
+        if v >= 20:  return f"{name}后 40%"
+        return f"{name}后 20%"
+    parts.append(_label("动量", sub["momentum"]))
+    parts.append(_label("量价", sub["volprice"]))
+    parts.append(_label("行业相对", sub["industry_relative"]))
+    parts.append(_label("行业", sub["tech"]))
+    parts.append(f"宏观 {sub['macro']:.0f}")
+    op = {"STRONG_BUY": "→ 强烈看涨", "BUY": "→ 短线看涨",
+          "HOLD": "→ 观望", "SELL": "→ 短线回避", "STRONG_SELL": "→ 强烈回避"}.get(signal, "")
+    if op:
+        parts.append(op)
     return "。".join(parts) + "。"
 
 
@@ -472,9 +752,13 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
     t0 = time.time()
 
     # 预加载缓存
-    macro_100        = score_macro(db) / 15 * 100
-    industries_map   = {i.code: i for i in db.query(Industry).all()}
-    logger.info(f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个")
+    macro_100         = score_macro(db) / 15 * 100
+    industries_map    = {i.code: i for i in db.query(Industry).all()}
+    industry_returns  = compute_industry_returns_at(db)
+    logger.info(
+        f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个，"
+        f"industry_returns={len(industry_returns)} 个"
+    )
 
     # 拉所有股票（一次性，不在循环里）
     q = db.query(Stock).filter_by(is_active=True)
@@ -482,26 +766,51 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
         q = q.limit(limit)
     stocks = q.all()
 
-    results = {}
-    skipped = 0
+    # Phase 1：算所有股票的 raw 信号（不 write_back，等排名后再写）
+    raw_results = {}   # stock_code → full signal dict
+    stock_map   = {s.code: s for s in stocks}
+    skipped     = 0
     for stock in stocks:
         try:
             r = generate_short_signal(
                 db, stock.code,
-                write_back=True, commit=False,        # 关键：不在循环里 commit
-                _cached_macro_100=macro_100,           # 复用全局 macro
-                _cached_stock=stock,                   # 直接用已加载的 Stock 对象
-                _cached_industries=industries_map,     # 复用 industries dict
+                write_back=False, commit=False,        # 关键：先不写
+                _cached_macro_100=macro_100,
+                _cached_stock=stock,
+                _cached_industries=industries_map,
+                _cached_industry_returns=industry_returns,
             )
             if r:
-                results[stock.code] = r["short_signal"]
+                raw_results[stock.code] = r
             else:
                 skipped += 1
         except Exception as e:
             logger.warning(f"短期信号 {stock.code}: {e}")
             skipped += 1
 
-    # 一次性提交（vs 5196 次单独 commit）
+    # Phase 2：截面排名（v203）
+    if settings.SHORT_USE_CROSS_SECTIONAL_RANKS:
+        _apply_cross_sectional_ranks(raw_results)
+        logger.info(f"短期信号：cross-sectional ranking 已应用 ({len(raw_results)} 只)")
+
+    # Phase 3：写回 Stock 对象 + commit
+    results = {}
+    for code, r in raw_results.items():
+        stock = stock_map.get(code)
+        if not stock:
+            continue
+        sub = r["sub_scores"]
+        stock.short_composite_score          = r["short_composite_score"]
+        stock.short_signal                   = r["short_signal"]
+        stock.short_signal_reason            = r["short_signal_reason"]
+        stock.short_signal_updated           = datetime.utcnow()
+        stock.short_score_momentum           = sub.get("momentum")
+        stock.short_score_volprice           = sub.get("volprice")
+        stock.short_score_macro              = sub.get("macro")
+        stock.short_score_tech               = sub.get("tech")
+        stock.short_score_news_heat          = sub.get("news_heat")
+        stock.short_score_industry_relative  = sub.get("industry_relative")
+        results[code] = r["short_signal"]
     db.commit()
 
     elapsed = time.time() - t0

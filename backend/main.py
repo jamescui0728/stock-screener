@@ -145,6 +145,15 @@ async def lifespan(app: FastAPI):
     logger.info("初始化数据库...")
     init_db()
 
+    # 幂等 schema 迁移：补齐历史 volume 里缺失的新列 / 索引
+    # （避免 Docker 重建镜像后跑 SELECT 新列时 OperationalError）
+    from auto_migrate import run_auto_migrations
+    _mig_db = SessionLocal()
+    try:
+        run_auto_migrations(_mig_db)
+    finally:
+        _mig_db.close()
+
     logger.info("注册定时任务...")
     scheduler.add_job(
         _daily_data_update, "cron",

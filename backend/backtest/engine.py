@@ -8,7 +8,7 @@
 4. 实时进度通过 backtest.progress 模块对外暴露
 """
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 import numpy as np
@@ -18,8 +18,18 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import SessionLocal
 from engines.signal_engine import generate_signal
+from engines.short_signal_engine import (
+    generate_short_signal,
+    compute_industry_returns_at,
+    _apply_cross_sectional_ranks,
+)
 from models.models import BacktestRecord, BacktestRun, PriceData, Stock
 from backtest.progress import get_progress, reset as reset_progress
+
+# 长期信号的 sub_scores 维度（用于误差归因饼图）
+LONG_DIMS  = ("fundamental", "valuation", "sentiment", "macro")
+# 短期信号的 sub_scores 维度
+SHORT_DIMS = ("momentum", "volprice", "macro", "tech", "news_heat", "industry_relative")
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +42,27 @@ def run_backtest(
     description: str = "",
     version: int = 1,
     sample_codes: Optional[list] = None,
+    signal_type: str = "long",
 ) -> int:
     """
     执行一次完整的滚动回测，返回 BacktestRun.id
-    进度实时写入 backtest.progress 单例
+
+    signal_type:
+      "long"  — 调用 generate_signal（基本面+估值+舆情+宏观），季度检查，默认持有 365 天
+      "short" — 调用 generate_short_signal（动量+量价+宏观+科技+新闻），周检查，默认持有 14 天
     """
+    if signal_type not in ("long", "short"):
+        raise ValueError(f"signal_type 必须是 'long' / 'short'，收到 {signal_type!r}")
+
     db = SessionLocal()
     try:
         # 确保沪深300基准数据已入库
         ensure_benchmark_data(db)
 
         run = BacktestRun(
-            description=description or f"回测 v{version}",
+            description=description or f"{'短期' if signal_type == 'short' else ''}回测 v{version}",
             version=version,
+            signal_type=signal_type,
             params=params or {},
         )
         db.add(run)
@@ -54,34 +72,73 @@ def run_backtest(
 
         # ── 初始化进度 ──
         prog = reset_progress(run_id)
-        prog.push_log(f"回测 v{version} 已创建（run_id={run_id}）")
+        prog.push_log(f"{'短期' if signal_type == 'short' else '长期'}回测 v{version} 已创建（run_id={run_id}）")
 
         p = params or {}
-        train_years = int(p.get("train_years", settings.BACKTEST_TRAIN_YEARS))
-        val_years   = int(p.get("val_years",   settings.BACKTEST_VAL_YEARS))
-        hold_months = int(p.get("hold_months", settings.HOLD_MONTHS))
-        start_year  = int(p.get("start_year",  settings.BACKTEST_START_YEAR))
+        # 长/短期的训练/验证窗口默认值不同 — 短期数据从 2022 起算，
+        # 若沿用长期的 train=5/val=2（共 7 年）会得到 0 个窗口
+        if signal_type == "short":
+            default_train = settings.BACKTEST_TRAIN_YEARS_SHORT
+            default_val   = settings.BACKTEST_VAL_YEARS_SHORT
+        else:
+            default_train = settings.BACKTEST_TRAIN_YEARS
+            default_val   = settings.BACKTEST_VAL_YEARS
+        # 用 float 支持半年（短期默认 1.5 / 0.5）
+        train_years = float(p.get("train_years", default_train))
+        val_years   = float(p.get("val_years",   default_val))
+        start_year  = int(p.get("start_year",    settings.BACKTEST_START_YEAR))
+
+        # 持有天数 + 检查频率（按 signal_type 切换默认值）
+        default_hold = (settings.BACKTEST_HOLD_DAYS_SHORT if signal_type == "short"
+                        else settings.BACKTEST_HOLD_DAYS_LONG)
+        default_freq = (settings.BACKTEST_CHECK_FREQ_DAYS_SHORT if signal_type == "short"
+                        else settings.BACKTEST_CHECK_FREQ_DAYS_LONG)
+        hold_days       = int(p.get("hold_days",       default_hold))
+        check_freq_days = int(p.get("check_freq_days", default_freq))
+
+        # 短期回测不需要早到 2014：节省样本量、聚焦近期市场
+        # 长期保留 start_year（含训练 5 年验证 2 年的窗口设计）
+        if signal_type == "short" and "start_year" not in p:
+            start_year = max(start_year, date.today().year - 4)   # 近 4 年
 
         # 计算总窗口数
-        window_start = date(start_year, 1, 1)
-        end_date     = date.today() - relativedelta(months=hold_months + 1)
+        # 用 months 来支持小数年（短期默认 train=1.5y / val=0.5y）；
+        # 步长保持 1 年（窗口滚动），太密集 backtest 会爆炸
+        window_start  = date(start_year, 1, 1)
+        end_date      = date.today() - timedelta(days=hold_days + 30)
+        total_months  = int(round((train_years + val_years) * 12))
+        train_months  = int(round(train_years * 12))
+        val_months    = int(round(val_years   * 12))
         total_windows = 0
         ws = window_start
-        while ws + relativedelta(years=train_years + val_years) <= end_date:
+        while ws + relativedelta(months=total_months) <= end_date:
             total_windows += 1
             ws += relativedelta(years=1)
 
         prog.total = total_windows
         prog.stage = f"准备滚动窗口（共 {total_windows} 个）"
-        prog.push_log(f"参数：train={train_years}年 val={val_years}年 hold={hold_months}月")
+        prog.push_log(
+            f"参数：signal_type={signal_type} train={train_years}年 "
+            f"val={val_years}年 hold={hold_days}天 检查间隔={check_freq_days}天"
+        )
         prog.push_log(f"时间范围：{start_year} → {end_date}")
 
         # ── 确定样本股票 ──
         if sample_codes:
             target_codes = sample_codes
             _ensure_price_for_stocks(db, target_codes, prog)
+        elif signal_type == "short":
+            # 短期回测：只要有足够价格数据即可（短期信号不依赖财务）
+            price_codes = sorted(set(
+                r[0] for r in
+                db.query(PriceData.stock_code)
+                .filter(PriceData.stock_code != BENCHMARK_CODE)
+                .distinct().all()
+            ))
+            target_codes = price_codes
+            prog.push_log(f"样本股票：{len(target_codes)} 只（短期信号仅需价格数据）")
         else:
-            # 优先使用同时有财务数据 + 价格数据的股票（避免大批量拉取）
+            # 长期回测：优先使用同时有财务数据 + 价格数据的股票
             from models.models import FinancialData
             from sqlalchemy import func
             fin_codes = set(
@@ -117,9 +174,9 @@ def run_backtest(
         window_results = []
         window_idx = 0
 
-        while window_start + relativedelta(years=train_years + val_years) <= end_date:
-            val_start = window_start + relativedelta(years=train_years)
-            val_end   = val_start + relativedelta(years=val_years)
+        while window_start + relativedelta(months=total_months) <= end_date:
+            val_start = window_start + relativedelta(months=train_months)
+            val_end   = val_start + relativedelta(months=val_months)
             window_idx += 1
 
             prog.current = window_idx
@@ -128,7 +185,10 @@ def run_backtest(
             prog.push_log(f"▶ 窗口 {window_idx}：验证期 {val_start} ~ {val_end}")
 
             window_records = _run_window(
-                db, run_id, val_start, val_end, hold_months, params, sample_codes, prog
+                db, run_id, val_start, val_end,
+                hold_days, check_freq_days, params, sample_codes, prog,
+                signal_type=signal_type,
+                target_codes=target_codes,
             )
             if window_records:
                 metrics = _calc_window_metrics(window_records)
@@ -147,9 +207,9 @@ def run_backtest(
         prog.push_log("正在计算 IC / Sharpe / 最大回撤...")
 
         all_records = db.query(BacktestRecord).filter_by(run_id=run_id).all()
-        summary     = _calc_summary_metrics(all_records)
-        false_buys  = _analyze_false_signals(all_records, ("BUY", "STRONG_BUY"))
-        false_sells = _analyze_false_signals(all_records, ("SELL", "STRONG_SELL"))
+        summary     = _calc_summary_metrics(all_records, hold_days=hold_days)
+        false_buys  = _analyze_false_signals(all_records, ("BUY", "STRONG_BUY"),  signal_type=signal_type)
+        false_sells = _analyze_false_signals(all_records, ("SELL", "STRONG_SELL"), signal_type=signal_type)
 
         run = db.query(BacktestRun).filter_by(id=run_id).first()
         run.win_rate          = summary.get("win_rate")
@@ -236,88 +296,142 @@ def _run_window(
     run_id: int,
     val_start: date,
     val_end: date,
-    hold_months: int,
+    hold_days: int,
+    check_freq_days: int,
     params: Optional[dict],
     sample_codes: Optional[list],
     prog=None,
+    signal_type: str = "long",
+    target_codes: Optional[list] = None,
 ) -> list:
     records = []
-    check_dates = _quarterly_dates(val_start, val_end)
+    check_dates = _check_dates(val_start, val_end, check_freq_days)
 
     stocks = db.query(Stock).filter_by(is_active=True).all()
     if sample_codes:
         stocks = [s for s in stocks if s.code in sample_codes]
-
-    total_steps = len(check_dates) * len(stocks)
-    step = 0
+    elif target_codes is not None:
+        keep = set(target_codes)
+        stocks = [s for s in stocks if s.code in keep]
 
     for check_date in check_dates:
         if prog:
             prog.push_log(f"  检查日 {check_date}（{len(stocks)} 只）")
 
-        for stock in stocks:
-            step += 1
-            try:
-                result = generate_signal(
-                    db, stock.code,
-                    as_of_date=check_date,
-                    params=params,
-                    write_back=False,
-                )
-                if result is None:
-                    continue
-
-                signal = result["signal"]
-                if signal not in ("BUY", "SELL"):
-                    continue
-
-                exit_date = check_date + relativedelta(months=hold_months)
-                if exit_date > date.today():
-                    continue
-
-                entry_price = _get_price(db, stock.code, check_date)
-                exit_price  = _get_price(db, stock.code, exit_date)
-                bench_entry = _get_benchmark_price(db, check_date)
-                bench_exit  = _get_benchmark_price(db, exit_date)
-
-                if not entry_price or not exit_price:
-                    continue
-
-                stock_ret  = (exit_price - entry_price) / entry_price
-                bench_ret  = (
-                    (bench_exit - bench_entry) / bench_entry
-                    if bench_entry and bench_exit and bench_entry != 0 else 0.0
-                )
-                excess_ret = stock_ret - bench_ret
-                # 5 等级：STRONG_BUY/BUY 视为"看多"，STRONG_SELL/SELL 视为"看空"
-                is_buy_signal  = signal in ("BUY", "STRONG_BUY")
-                is_win = excess_ret > 0 if is_buy_signal else excess_ret < 0
-
-                rec = BacktestRecord(
-                    run_id=run_id,
-                    stock_code=stock.code,
-                    signal_date=check_date,
-                    signal=signal,
-                    composite_score=result["composite_score"],
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    hold_months=hold_months,
-                    stock_return=round(stock_ret * 100, 4),
-                    bench_return=round(bench_ret * 100, 4),
-                    excess_return=round(excess_ret * 100, 4),
-                    is_win=is_win,
-                    sub_scores=result.get("sub_scores"),
-                    news_summary=result.get("reason"),
-                )
-                db.add(rec)
-                records.append(rec)
-
-            except Exception as e:
-                logger.debug(f"信号 {stock.code}@{check_date}: {e}")
+        if signal_type == "short":
+            _run_short_check_date(
+                db, run_id, check_date, hold_days, stocks, params, records
+            )
+        else:
+            _run_long_check_date(
+                db, run_id, check_date, hold_days, stocks, params, records
+            )
 
         db.commit()
 
     return records
+
+
+def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, records):
+    """短期回测：两阶段（raw → 截面排名 → BacktestRecord）"""
+    ind_returns_at_date = compute_industry_returns_at(db, check_date)
+
+    raw_short = {}
+    for stock in stocks:
+        try:
+            r = generate_short_signal(
+                db, stock.code,
+                as_of_date=check_date,
+                write_back=False,
+                commit=False,
+                _cached_stock=stock,
+                _cached_industry_returns=ind_returns_at_date,
+            )
+            if r:
+                raw_short[stock.code] = r
+        except Exception as e:
+            logger.debug(f"短期信号 {stock.code}@{check_date}: {e}")
+
+    if settings.SHORT_USE_CROSS_SECTIONAL_RANKS:
+        _apply_cross_sectional_ranks(raw_short)
+
+    for code, result in raw_short.items():
+        rec = _signal_to_record(
+            db, run_id, code, check_date, hold_days,
+            signal=result.get("short_signal"),
+            composite_score=result.get("short_composite_score"),
+            sub_scores=result.get("sub_scores"),
+            reason=result.get("short_signal_reason"),
+        )
+        if rec:
+            db.add(rec)
+            records.append(rec)
+
+
+def _run_long_check_date(db, run_id, check_date, hold_days, stocks, params, records):
+    """长期回测：单阶段路径"""
+    for stock in stocks:
+        try:
+            result = generate_signal(
+                db, stock.code,
+                as_of_date=check_date,
+                params=params,
+                write_back=False,
+            )
+            if result is None:
+                continue
+            rec = _signal_to_record(
+                db, run_id, stock.code, check_date, hold_days,
+                signal=result.get("signal"),
+                composite_score=result.get("composite_score"),
+                sub_scores=result.get("sub_scores"),
+                reason=result.get("reason"),
+            )
+            if rec:
+                db.add(rec)
+                records.append(rec)
+        except Exception as e:
+            logger.debug(f"长期信号 {stock.code}@{check_date}: {e}")
+
+
+def _signal_to_record(db, run_id, stock_code, check_date, hold_days,
+                      signal, composite_score, sub_scores, reason):
+    """信号 → 价格查询 → 超额收益计算 → BacktestRecord（或 None）"""
+    if signal not in ("BUY", "SELL", "STRONG_BUY", "STRONG_SELL"):
+        return None
+    exit_date = check_date + timedelta(days=hold_days)
+    if exit_date > date.today():
+        return None
+    entry_price = _get_price(db, stock_code, check_date)
+    exit_price  = _get_price(db, stock_code, exit_date)
+    bench_entry = _get_benchmark_price(db, check_date)
+    bench_exit  = _get_benchmark_price(db, exit_date)
+    if not entry_price or not exit_price:
+        return None
+    stock_ret = (exit_price - entry_price) / entry_price
+    bench_ret = (
+        (bench_exit - bench_entry) / bench_entry
+        if bench_entry and bench_exit and bench_entry != 0 else 0.0
+    )
+    excess_ret = stock_ret - bench_ret
+    is_buy_signal = signal in ("BUY", "STRONG_BUY")
+    is_win = excess_ret > 0 if is_buy_signal else excess_ret < 0
+    return BacktestRecord(
+        run_id=run_id,
+        stock_code=stock_code,
+        signal_date=check_date,
+        signal=signal,
+        composite_score=composite_score,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        hold_days=hold_days,
+        stock_return=round(stock_ret * 100, 4),
+        bench_return=round(bench_ret * 100, 4),
+        excess_return=round(excess_ret * 100, 4),
+        is_win=is_win,
+        sub_scores=sub_scores,
+        news_summary=reason,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -335,30 +449,36 @@ def _calc_window_metrics(records: list) -> dict:
     }
 
 
-def _calc_summary_metrics(records: list) -> dict:
+def _calc_summary_metrics(records: list, hold_days: int = 365) -> dict:
     buys  = [r for r in records if r.signal in ("BUY", "STRONG_BUY")  and r.is_win is not None]
     sells = [r for r in records if r.signal in ("SELL", "STRONG_SELL") and r.is_win is not None]
 
     win_rate      = _safe_mean([r.is_win for r in buys]) * 100
     sell_accuracy = _safe_mean([r.is_win for r in sells]) * 100
-    excess_returns = [r.excess_return for r in buys + sells if r.excess_return is not None]
 
-    scores = [r.composite_score for r in buys + sells if r.composite_score is not None]
+    # IC：用 buys+sells 全样本算 rank 相关性是对的（高分 BUY 正超额，低分 SELL 负超额，单调关系）
+    excess_returns_all = [r.excess_return for r in buys + sells if r.excess_return is not None]
+    scores             = [r.composite_score for r in buys + sells if r.composite_score is not None]
     ic_val = 0.0
     ic_ir  = 0.0
-    if len(scores) >= 10 and len(excess_returns) >= 10:
+    if len(scores) >= 10 and len(excess_returns_all) >= 10:
         from scipy.stats import spearmanr
-        ic_val, _ = spearmanr(scores[:len(excess_returns)], excess_returns[:len(scores)])
+        ic_val, _ = spearmanr(scores[:len(excess_returns_all)], excess_returns_all[:len(scores)])
         ic_val = float(ic_val) if not np.isnan(ic_val) else 0.0
         ic_ir  = ic_val / 0.1
 
-    alpha  = float(np.mean(excess_returns)) if excess_returns else 0.0
-    std    = float(np.std(excess_returns))  if len(excess_returns) > 1 else 1.0
+    # Alpha / Sharpe / 年化：只用 BUY 端（这是 long-only 策略，散户做空不便）
+    # 之前 bug：把 buys+sells 的 excess_return 混合，SELL 正确时是负超额，
+    # SELL 数量远超 BUY 时（高阈值场景）→ 平均被拖成负数。
+    buy_excess = [r.excess_return for r in buys if r.excess_return is not None]
+    alpha  = float(np.mean(buy_excess)) if buy_excess else 0.0
+    std    = float(np.std(buy_excess))  if len(buy_excess) > 1 else 1.0
     sharpe = alpha / std if std != 0 else 0.0
 
     buy_rets = [r.stock_return for r in buys if r.stock_return is not None]
     max_dd   = _max_drawdown(buy_rets)
-    ann_alpha = alpha * (12 / max(settings.HOLD_MONTHS, 1))
+    # 年化：把单次持有期超额收益按 365/hold_days 倍放大
+    ann_alpha = alpha * (365.0 / max(hold_days, 1))
 
     opt_score = (
         win_rate / 100 * settings.OPT_W_WIN_RATE +
@@ -378,8 +498,11 @@ def _calc_summary_metrics(records: list) -> dict:
     }
 
 
-def _analyze_false_signals(records: list, signal: str) -> list:
-    # signal 参数支持单值或多值（"BUY" / ("BUY","STRONG_BUY")）
+def _analyze_false_signals(records: list, signal, signal_type: str = "long") -> list:
+    """
+    signal: 单值或多值（"BUY" / ("BUY","STRONG_BUY")）
+    signal_type: "long" / "short"，决定使用哪套维度
+    """
     if isinstance(signal, str):
         match_set = {signal}
     else:
@@ -387,16 +510,13 @@ def _analyze_false_signals(records: list, signal: str) -> list:
     false_records = [r for r in records if r.signal in match_set and r.is_win is False]
     if not false_records:
         return []
+
+    dim_keys = SHORT_DIMS if signal_type == "short" else LONG_DIMS
     patterns = {}
     for rec in false_records:
         if not rec.sub_scores:
             continue
-        dims = {
-            "fundamental": rec.sub_scores.get("fundamental", 50),
-            "valuation":   rec.sub_scores.get("valuation", 50),
-            "sentiment":   rec.sub_scores.get("sentiment", 50),
-            "macro":       rec.sub_scores.get("macro", 50),
-        }
+        dims = {k: rec.sub_scores.get(k, 50) for k in dim_keys}
         weakest = min(dims, key=dims.get)
         patterns[weakest] = patterns.get(weakest, 0) + 1
     return [{"pattern": k, "count": v} for k, v in sorted(patterns.items(), key=lambda x: -x[1])]
@@ -473,11 +593,12 @@ def ensure_benchmark_data(db: Session):
         logger.error(f"拉取沪深300失败: {e}")
 
 
-def _quarterly_dates(start: date, end: date) -> list:
+def _check_dates(start: date, end: date, freq_days: int) -> list:
+    """按 freq_days 间隔生成检查日列表"""
     dates, current = [], start
     while current <= end:
         dates.append(current)
-        current += relativedelta(months=3)
+        current += timedelta(days=max(freq_days, 1))
     return dates
 
 

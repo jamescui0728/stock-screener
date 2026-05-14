@@ -97,6 +97,7 @@ class Stock(Base):
     short_score_macro     = Column(Float, nullable=True)
     short_score_tech      = Column(Float, nullable=True)
     short_score_news_heat = Column(Float, nullable=True)
+    short_score_industry_relative = Column(Float, nullable=True)   # v202 第 6 维
 
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -241,6 +242,10 @@ class BacktestRun(Base):
     version     = Column(Integer, default=1)
     description = Column(Text, nullable=True)
 
+    # 信号类型（v200 新增）：long = 长期信号回测；short = 短期信号回测
+    # 历史数据默认为 "long"，由迁移脚本回填
+    signal_type = Column(String(10), nullable=False, default="long", index=True)
+
     # 参数快照
     params = Column(JSON, nullable=True)
 
@@ -275,7 +280,8 @@ class BacktestRecord(Base):
     composite_score = Column(Float, nullable=True)
     entry_price  = Column(Float, nullable=True)
     exit_price   = Column(Float, nullable=True)
-    hold_months  = Column(Integer, nullable=True)
+    hold_months  = Column(Integer, nullable=True)  # 历史字段（长期回测旧值），新代码不再写
+    hold_days    = Column(Integer, nullable=True)  # v200 起统一用 days（长/短均适用）
     stock_return = Column(Float, nullable=True)        # 持有期收益率 %
     bench_return = Column(Float, nullable=True)        # 同期基准收益率 %
     excess_return = Column(Float, nullable=True)       # 超额收益 %
