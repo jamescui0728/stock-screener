@@ -98,6 +98,7 @@ class Stock(Base):
     short_score_tech      = Column(Float, nullable=True)
     short_score_news_heat = Column(Float, nullable=True)
     short_score_industry_relative = Column(Float, nullable=True)   # v202 第 6 维
+    short_score_pricing_power     = Column(Float, nullable=True)   # v202f 第 7 维
 
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

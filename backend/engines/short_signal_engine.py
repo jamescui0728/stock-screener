@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from config import settings
-from models.models import PriceData, Stock, NewsItem, Industry
+from models.models import PriceData, Stock, NewsItem, Industry, FinancialData
 from engines.signal_engine import score_macro
 
 logger = logging.getLogger(__name__)
@@ -433,7 +433,128 @@ def score_news_heat(db: Session, stock_code: str, as_of_date=None) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
-# 5. 综合短期信号
+# 6. 定价权评分（0-100）— 财报维度
+# ════════════════════════════════════════════════════════════════
+def compute_industry_avg_gm(db: Session) -> dict:
+    """
+    批量计算每个行业的平均毛利率（近 3 年均值）。
+    返回 {industry_code: avg_gross_margin}
+    """
+    # 拉所有有 industry_code 的股票
+    stock_ind = dict(
+        db.query(Stock.code, Stock.industry_code)
+        .filter(Stock.is_active == True, Stock.industry_code.isnot(None))
+        .all()
+    )
+    if not stock_ind:
+        return {}
+
+    cutoff = date.today().year - 3
+    rows = (
+        db.query(FinancialData.stock_code, FinancialData.gross_margin)
+        .filter(
+            FinancialData.report_type == "annual",
+            FinancialData.period >= date(cutoff, 1, 1),
+            FinancialData.gross_margin.isnot(None),
+        )
+        .all()
+    )
+
+    from collections import defaultdict
+    ind_gms = defaultdict(list)
+    for code, gm in rows:
+        ind_code = stock_ind.get(code)
+        if ind_code and gm is not None:
+            ind_gms[ind_code].append(gm)
+
+    return {
+        ind: sum(vals) / len(vals)
+        for ind, vals in ind_gms.items()
+        if len(vals) >= 2  # 至少 2 个数据点才有意义
+    }
+
+
+def score_pricing_power(
+    db: Session, stock_code: str,
+    _cached_industry_gm: Optional[dict] = None,
+) -> dict:
+    """
+    定价权评分（0-100）：
+    1. 毛利率水平 vs 行业（40 分）— 高于行业 = 强定价权
+    2. 毛利率稳定性（30 分）— 低波动 = 定价权稳固
+    3. 毛利率趋势（30 分）— 上升 = 定价权增强
+
+    无财报数据 → 返回 50（中性），不影响信号
+    """
+    cutoff_year = date.today().year - 5
+    fin_rows = (
+        db.query(FinancialData)
+        .filter(
+            FinancialData.stock_code == stock_code,
+            FinancialData.report_type == "annual",
+            FinancialData.period >= date(cutoff_year, 1, 1),
+            FinancialData.gross_margin.isnot(None),
+        )
+        .order_by(FinancialData.period.desc())
+        .limit(5)
+        .all()
+    )
+
+    if len(fin_rows) < 2:
+        return {"score": 50.0, "gm_level": None, "gm_stability": None, "gm_trend": None,
+                "company_gm": None, "industry_gm": None}
+
+    # 按时间正序排列（最老在前）
+    fin_rows = sorted(fin_rows, key=lambda r: r.period)
+    margins = [r.gross_margin for r in fin_rows]
+    avg_gm = sum(margins) / len(margins)
+
+    # ── 子项 1：毛利率水平 vs 行业（40 分）──
+    stock = db.query(Stock).filter_by(code=stock_code).first()
+    industry_gm = None
+    gm_level_score = 20.0  # 默认行业中位数
+    if stock and stock.industry_code and _cached_industry_gm:
+        industry_gm = _cached_industry_gm.get(stock.industry_code)
+    if industry_gm is not None and industry_gm > 0:
+        diff = avg_gm - industry_gm
+        # diff = +15% → 40分, diff = 0 → 20分, diff = -15% → 0分
+        gm_level_score = max(0.0, min(40.0, 20.0 + diff / 15.0 * 20.0))
+
+    # ── 子项 2：毛利率稳定性（30 分）──
+    import numpy as np
+    gm_std = float(np.std(margins))
+    # std < 1% → 30, std = 3% → 10, std > 5% → 0
+    if gm_std < 1.0:
+        gm_stability_score = 30.0
+    elif gm_std < 5.0:
+        gm_stability_score = max(0.0, 30.0 - (gm_std - 1.0) / 4.0 * 30.0)
+    else:
+        gm_stability_score = 0.0
+
+    # ── 子项 3：毛利率趋势（30 分）──
+    if len(margins) >= 3:
+        x = np.arange(len(margins))
+        slope = float(np.polyfit(x, margins, 1)[0])
+        # slope = +2%/年 → 30分, 0 → 15分, -2%/年 → 0分
+        gm_trend_score = max(0.0, min(30.0, 15.0 + slope / 2.0 * 15.0))
+    else:
+        gm_trend_score = 15.0  # 数据不足，默认中性
+
+    score = gm_level_score + gm_stability_score + gm_trend_score
+    score = round(max(0.0, min(100.0, score)), 2)
+
+    return {
+        "score":         score,
+        "gm_level":      round(gm_level_score, 2),
+        "gm_stability":  round(gm_stability_score, 2),
+        "gm_trend":      round(gm_trend_score, 2),
+        "company_gm":    round(avg_gm, 2),
+        "industry_gm":   round(industry_gm, 2) if industry_gm is not None else None,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# 7. 综合短期信号
 # ════════════════════════════════════════════════════════════════
 def generate_short_signal(
     db: Session, stock_code: str, as_of_date=None,
@@ -444,6 +565,7 @@ def generate_short_signal(
     _cached_stock: Optional[Stock] = None,
     _cached_industries: Optional[dict] = None,
     _cached_industry_returns: Optional[dict] = None,
+    _cached_industry_gm: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -455,8 +577,9 @@ def generate_short_signal(
     - _cached_macro_100: 已计算的 macro_score / 15 * 100（全局共享，每只一样）
     - _cached_stock:     已加载的 Stock 对象（避免重复查询）
     - _cached_industries:{code → Industry} 字典（避免每只查 Industry 表）
+    - _cached_industry_gm:{industry_code → avg_gm} 字典（避免每只重新聚合财务数据）
     """
-    # 5 维评分
+    # 7 维评分
     mom = score_momentum(db, stock_code, as_of_date)
     if mom is None:
         return None   # 价格数据不足，没法算
@@ -482,15 +605,20 @@ def generate_short_signal(
         _cached_stock=_cached_stock,
         _cached_industry_returns=_cached_industry_returns,
     )
+    pp = score_pricing_power(
+        db, stock_code,
+        _cached_industry_gm=_cached_industry_gm,
+    )
 
-    # 加权综合分（v202：加入 industry_relative 第 6 维）
+    # 加权综合分（v202f：加入 pricing_power 第 7 维）
     composite = (
         mom["score"]       * settings.SHORT_MOMENTUM_WEIGHT          +
         vp["score"]        * settings.SHORT_VOLPRICE_WEIGHT          +
         macro_100          * settings.SHORT_MACRO_WEIGHT             +
         tech["score"]      * settings.SHORT_TECH_WEIGHT              +
         news_heat["score"] * settings.SHORT_NEWS_HEAT_WEIGHT         +
-        ind_rel["score"]   * settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
+        ind_rel["score"]   * settings.SHORT_INDUSTRY_RELATIVE_WEIGHT +
+        pp["score"]        * settings.SHORT_PRICING_POWER_WEIGHT
     )
     composite = round(max(0, min(100, composite)), 2)
 
@@ -505,7 +633,7 @@ def generate_short_signal(
         signal = "SELL"
     else:
         signal = "STRONG_SELL"
-    reason = _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel)
+    reason = _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel, pp)
 
     result = {
         "short_composite_score": composite,
@@ -518,6 +646,7 @@ def generate_short_signal(
             "tech":              tech["score"],
             "news_heat":         news_heat["score"],
             "industry_relative": ind_rel["score"],
+            "pricing_power":     pp["score"],
         },
         "details": {
             "momentum":          mom,
@@ -525,6 +654,7 @@ def generate_short_signal(
             "tech":              tech,
             "news_heat":         news_heat,
             "industry_relative": ind_rel,
+            "pricing_power":     pp,
         },
     }
 
@@ -542,13 +672,14 @@ def generate_short_signal(
             stock.short_score_tech               = tech["score"]
             stock.short_score_news_heat          = news_heat["score"]
             stock.short_score_industry_relative  = ind_rel["score"]
+            stock.short_score_pricing_power      = pp["score"]
             if commit:
                 db.commit()
 
     return result
 
 
-def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel=None) -> str:
+def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel=None, pp=None) -> str:
     """生成中文 reason"""
     parts = [f"短期信号：综合分 {composite}"]
 
@@ -583,6 +714,26 @@ def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, 
         else:
             label = f"跟随行业 {rel:+.1f}%"
         parts.append(f"行业相对：{label}")
+
+    # 定价权（v202f）
+    if pp and pp.get("company_gm") is not None:
+        gm = pp["company_gm"]
+        igm = pp.get("industry_gm")
+        if igm is not None:
+            diff = gm - igm
+            if diff > 5:
+                pp_desc = f"毛利率 {gm:.1f}%（行业 {igm:.1f}%，强定价权）"
+            elif diff > 0:
+                pp_desc = f"毛利率 {gm:.1f}%（行业 {igm:.1f}%，略高于行业）"
+            elif diff > -5:
+                pp_desc = f"毛利率 {gm:.1f}%（行业 {igm:.1f}%，行业中下游）"
+            else:
+                pp_desc = f"毛利率 {gm:.1f}%（行业 {igm:.1f}%，价格战选手）"
+        else:
+            pp_desc = f"毛利率 {gm:.1f}%（行业数据缺失）"
+        parts.append(f"定价权：{pp_desc}")
+    elif pp:
+        parts.append("定价权：无财报数据（中性 50 分）")
 
     # 新闻热度
     if news_heat["n_news"] > 0:
@@ -755,9 +906,10 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
     macro_100         = score_macro(db) / 15 * 100
     industries_map    = {i.code: i for i in db.query(Industry).all()}
     industry_returns  = compute_industry_returns_at(db)
+    industry_gm       = compute_industry_avg_gm(db)
     logger.info(
         f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个，"
-        f"industry_returns={len(industry_returns)} 个"
+        f"industry_returns={len(industry_returns)} 个，industry_gm={len(industry_gm)} 个"
     )
 
     # 拉所有股票（一次性，不在循环里）
@@ -779,6 +931,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
                 _cached_stock=stock,
                 _cached_industries=industries_map,
                 _cached_industry_returns=industry_returns,
+                _cached_industry_gm=industry_gm,
             )
             if r:
                 raw_results[stock.code] = r
@@ -810,6 +963,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
         stock.short_score_tech               = sub.get("tech")
         stock.short_score_news_heat          = sub.get("news_heat")
         stock.short_score_industry_relative  = sub.get("industry_relative")
+        stock.short_score_pricing_power      = sub.get("pricing_power")
         results[code] = r["short_signal"]
     db.commit()
 

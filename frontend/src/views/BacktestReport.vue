@@ -580,7 +580,7 @@ const winRateProgressColor = computed(() => {
 
 // 维度标签 + 改进建议按当前 tab 切换
 const dimLabels = computed(() => (signalType.value === 'short'
-  ? { momentum:'动量', volprice:'量价', macro:'宏观', tech:'科技板块', news_heat:'新闻热度', industry_relative:'行业相对' }
+  ? { momentum:'动量', volprice:'量价', macro:'宏观', tech:'科技板块', news_heat:'新闻热度', industry_relative:'行业相对', pricing_power:'定价权' }
   : { fundamental:'基本面', valuation:'估值', sentiment:'舆情', macro:'宏观' }
 ))
 
@@ -600,6 +600,7 @@ const improveSuggestion = computed(() => {
     tech:      '降低非科技板块的入场权重',
     news_heat: '过滤无新闻的冷门标的或负面消息密集股',
     industry_relative: '收紧行业相对反转门槛（要求跑输行业幅度 >3%）',
+    pricing_power: '提高定价权门槛（要求毛利率高于行业 +5% 以上）',
   }
   const map = signalType.value === 'short' ? shortMap : longMap
   return map[top] ?? '调整对应维度的权重或阈值'

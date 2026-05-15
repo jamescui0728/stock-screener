@@ -91,13 +91,14 @@ class Settings(BaseSettings):
     # 未来若加入正交因子（盈利惊喜 / 内幕交易 / 期权偏度等）可重新打开。
     SHORT_USE_CROSS_SECTIONAL_RANKS: bool = False
 
-    # v202b 生产配置（IC=+0.108, win=50.4%）
+    # v202b+ 生产配置（IC=+0.108, win=50.4%，加定价权 v202f）
     SHORT_MOMENTUM_WEIGHT:           float = 0.00
     SHORT_VOLPRICE_WEIGHT:           float = 0.40
     SHORT_MACRO_WEIGHT:              float = 0.30
-    SHORT_TECH_WEIGHT:               float = 0.10
+    SHORT_TECH_WEIGHT:               float = 0.05
     SHORT_NEWS_HEAT_WEIGHT:          float = 0.00
-    SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.20
+    SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.15
+    SHORT_PRICING_POWER_WEIGHT:      float = 0.10
     # 总和必须 = 1.0
 
     # v202e 阈值（目标 BUY 胜率 ≥ 85%）：
@@ -205,7 +206,8 @@ def _validate_weights():
         settings.SHORT_MACRO_WEIGHT +
         settings.SHORT_TECH_WEIGHT +
         settings.SHORT_NEWS_HEAT_WEIGHT +
-        settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
+        settings.SHORT_INDUSTRY_RELATIVE_WEIGHT +
+        settings.SHORT_PRICING_POWER_WEIGHT
     )
     if abs(short_sum - 1.0) > 0.001:
         logger.warning(f"短期信号权重总和 = {short_sum:.3f} ≠ 1.0，请检查配置")

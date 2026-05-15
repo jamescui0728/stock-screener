@@ -49,6 +49,9 @@ COLUMN_ADDS = [
 
     # v202 — 短期信号第 6 维（行业相对反转）
     ("stocks", "short_score_industry_relative", "FLOAT"),
+
+    # v202f — 短期信号第 7 维（定价权）
+    ("stocks", "short_score_pricing_power", "FLOAT"),
 ]
 
 

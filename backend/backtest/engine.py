@@ -21,6 +21,7 @@ from engines.signal_engine import generate_signal
 from engines.short_signal_engine import (
     generate_short_signal,
     compute_industry_returns_at,
+    compute_industry_avg_gm,
     _apply_cross_sectional_ranks,
 )
 from models.models import BacktestRecord, BacktestRun, PriceData, Stock
@@ -29,7 +30,7 @@ from backtest.progress import get_progress, reset as reset_progress
 # 长期信号的 sub_scores 维度（用于误差归因饼图）
 LONG_DIMS  = ("fundamental", "valuation", "sentiment", "macro")
 # 短期信号的 sub_scores 维度
-SHORT_DIMS = ("momentum", "volprice", "macro", "tech", "news_heat", "industry_relative")
+SHORT_DIMS = ("momentum", "volprice", "macro", "tech", "news_heat", "industry_relative", "pricing_power")
 
 logger = logging.getLogger(__name__)
 
@@ -314,13 +315,17 @@ def _run_window(
         keep = set(target_codes)
         stocks = [s for s in stocks if s.code in keep]
 
+    # 短期回测：行业毛利率缓存（全窗口共享，变化极慢）
+    industry_gm = compute_industry_avg_gm(db) if signal_type == "short" else None
+
     for check_date in check_dates:
         if prog:
             prog.push_log(f"  检查日 {check_date}（{len(stocks)} 只）")
 
         if signal_type == "short":
             _run_short_check_date(
-                db, run_id, check_date, hold_days, stocks, params, records
+                db, run_id, check_date, hold_days, stocks, params, records,
+                industry_gm=industry_gm,
             )
         else:
             _run_long_check_date(
@@ -332,7 +337,8 @@ def _run_window(
     return records
 
 
-def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, records):
+def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, records,
+                          industry_gm=None):
     """短期回测：两阶段（raw → 截面排名 → BacktestRecord）"""
     ind_returns_at_date = compute_industry_returns_at(db, check_date)
 
@@ -346,6 +352,7 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
                 commit=False,
                 _cached_stock=stock,
                 _cached_industry_returns=ind_returns_at_date,
+                _cached_industry_gm=industry_gm,
             )
             if r:
                 raw_short[stock.code] = r
