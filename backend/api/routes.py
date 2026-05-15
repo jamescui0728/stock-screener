@@ -828,12 +828,14 @@ def paper_quote(code: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "股票不存在")
     price, trade_date = pt._get_latest_price_with_date(db, code)
     return {
-        "code":       stock.code,
-        "name":       stock.name,
-        "signal":     stock.signal,
-        "composite_score": stock.composite_score,
-        "close":      price,
-        "trade_date": trade_date,
+        "code":                  stock.code,
+        "name":                  stock.name,
+        "signal":                stock.signal,
+        "composite_score":       stock.composite_score,
+        "short_signal":          stock.short_signal,
+        "short_composite_score": stock.short_composite_score,
+        "close":                 price,
+        "trade_date":            trade_date,
     }
 
 

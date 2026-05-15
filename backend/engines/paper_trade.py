@@ -299,18 +299,20 @@ def account_snapshot(db: Session, account_id: int) -> dict:
         market_value += mv
         cost_value   += cv
         position_details.append({
-            "stock_code":      p.stock_code,
-            "stock_name":      stock.name if stock else p.stock_code,
-            "shares":          p.shares,
-            "avg_cost":        round(p.avg_cost, 3),
-            "current_price":   round(cur, 3) if cur else None,
-            "market_value":    round(mv, 2),
-            "cost_value":      round(cv, 2),
-            "unrealized_pnl":  round(mv - cv, 2),
-            "pnl_pct":         round((mv / cv - 1) * 100, 2) if cv else 0.0,
-            "signal":          stock.signal if stock else None,
-            "composite_score": stock.composite_score if stock else None,
-            "opened_at":       str(p.opened_at),
+            "stock_code":           p.stock_code,
+            "stock_name":           stock.name if stock else p.stock_code,
+            "shares":               p.shares,
+            "avg_cost":             round(p.avg_cost, 3),
+            "current_price":        round(cur, 3) if cur else None,
+            "market_value":         round(mv, 2),
+            "cost_value":           round(cv, 2),
+            "unrealized_pnl":       round(mv - cv, 2),
+            "pnl_pct":              round((mv / cv - 1) * 100, 2) if cv else 0.0,
+            "signal":               stock.signal if stock else None,
+            "composite_score":      stock.composite_score if stock else None,
+            "short_signal":         stock.short_signal if stock else None,
+            "short_composite_score": stock.short_composite_score if stock else None,
+            "opened_at":            str(p.opened_at),
         })
 
     total_assets = acct.cash_balance + market_value

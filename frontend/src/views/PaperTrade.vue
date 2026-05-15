@@ -107,9 +107,14 @@
       >
         <el-table-column prop="stock_code" label="代码" width="90" fixed />
         <el-table-column prop="stock_name" label="名称" width="120" fixed />
-        <el-table-column label="信号" width="80">
+        <el-table-column label="长期" width="80">
           <template #default="{ row }">
             <SignalBadge :signal="row.signal" />
+          </template>
+        </el-table-column>
+        <el-table-column label="短期" width="80">
+          <template #default="{ row }">
+            <SignalBadge :signal="row.short_signal" />
           </template>
         </el-table-column>
         <el-table-column label="持股" width="90" align="right" prop="shares" sortable>
@@ -217,7 +222,11 @@
             <span class="quote-name">{{ quote.name }}</span>
             <SignalBadge :signal="quote.signal" />
             <span v-if="quote.composite_score != null" class="quote-score">
-              综合 {{ quote.composite_score?.toFixed(1) }}
+              {{ quote.composite_score?.toFixed(1) }}
+            </span>
+            <SignalBadge :signal="quote.short_signal" />
+            <span v-if="quote.short_composite_score != null" class="quote-score short">
+              {{ quote.short_composite_score?.toFixed(1) }}
             </span>
           </div>
         </el-form-item>
@@ -364,7 +373,7 @@ const renameAccountVisible = ref(false)
 const createAccountForm = reactive({ name: '', initial_cash: 1_000_000 })
 const renameAccountForm = reactive({ name: '' })
 
-const quote = reactive({ name: '', signal: '', composite_score: null, close: null, trade_date: '' })
+const quote = reactive({ name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
 
 const buyForm = reactive({
   stock_code: '',
@@ -498,13 +507,13 @@ async function loadQuote(code) {
     const q = await paperApi.quote(code)
     Object.assign(quote, q)
   } catch {
-    Object.assign(quote, { name: '', signal: '', composite_score: null, close: null, trade_date: '' })
+    Object.assign(quote, { name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
   }
 }
 
 // ── 买入 ──
 function openBuyDialog(row = null) {
-  Object.assign(quote, { name: '', signal: '', composite_score: null, close: null, trade_date: '' })
+  Object.assign(quote, { name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
   const lot = rules.value.lot_size || 100
   if (row) {
     // 持仓加仓：锁定 code
@@ -687,6 +696,7 @@ onMounted(async () => {
 .quote-line { display: flex; align-items: center; gap: 8px; }
 .quote-name { font-weight: 600; font-size: 15px; }
 .quote-score { font-size: 12px; color: #409eff; }
+.quote-score.short { color: #e6a23c; }
 .quote-price { font-size: 18px; font-weight: 700; color: #f56c6c; }
 .quote-date  { font-size: 12px; color: #888; margin-left: 6px; }
 
