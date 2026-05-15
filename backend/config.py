@@ -100,14 +100,13 @@ class Settings(BaseSettings):
     SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.20
     # 总和必须 = 1.0
 
-    # v202d 阈值（目标 BUY 胜率 ≥ 75%）：
-    # 基于 run 56 (15d cycle) 的更细精度分析：
-    #   composite ≥ 70 → 胜率 76.7%（n=176，平均超额 +6.13%）
-    #   composite ≥ 71 → 胜率 88.2%（n=68， 平均超额 +10.11%，"高确信度名单"）
-    # 注意：信号变非常稀疏（约 70 个 BUY/年，27 个 STRONG_BUY/年），
-    # 用户需要等待真正的高分共振机会
-    SHORT_STRONG_BUY_THRESHOLD:  float = 71.0
-    SHORT_BUY_THRESHOLD:         float = 70.0
+    # v202e 阈值（目标 BUY 胜率 ≥ 85%）：
+    # 精度分析（run 56, 15d cycle）：
+    #   composite ≥ 71 → 胜率 88.2%（n=68， 平均超额 +10.11%）
+    #   composite ≥ 73 → 胜率更高，更稀疏
+    # 信号稀疏（~68 个 BUY/年），用户需等待高分共振
+    SHORT_STRONG_BUY_THRESHOLD:  float = 73.0
+    SHORT_BUY_THRESHOLD:         float = 71.0
     SHORT_SELL_THRESHOLD:        float = 38.0
     SHORT_STRONG_SELL_THRESHOLD: float = 28.0
 
