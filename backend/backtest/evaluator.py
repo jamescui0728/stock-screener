@@ -6,6 +6,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from models.models import BacktestRecord, BacktestRun
 
+TOP_CASES_LIMIT = 10
+TOP_CASES_MAX_PER_DATE = 3
+
 
 def get_run_report(db: Session, run_id: int) -> Optional[dict]:
     """生成完整回测报告（供 API 返回前端）"""
@@ -20,14 +23,22 @@ def get_run_report(db: Session, run_id: int) -> Optional[dict]:
     # 按时间聚合
     monthly_perf = _monthly_performance(buy_records)
 
-    # Top 10 最优 / 最差案例
+    # Top 10 最优 / 最差案例：每个信号日最多展示 3 条，避免事件日霸屏。
     sorted_by_excess = sorted(
         [r for r in buy_records if r.excess_return is not None],
         key=lambda r: r.excess_return,
         reverse=True,
     )
-    top_wins  = [_record_to_dict(r) for r in sorted_by_excess[:10]]
-    top_loses = [_record_to_dict(r) for r in sorted_by_excess[-10:]]
+    top_wins = [
+        _record_to_dict(r)
+        for r in _pick_diversified_records(sorted_by_excess)
+    ]
+    top_loses = [
+        _record_to_dict(r)
+        for r in _pick_diversified_records(reversed(sorted_by_excess))
+    ]
+    date_concentration = _signal_date_concentration(buy_records)
+    top_date = date_concentration[0] if date_concentration else {}
 
     return {
         "run_id":          run.id,
@@ -48,11 +59,14 @@ def get_run_report(db: Session, run_id: int) -> Optional[dict]:
             "n_buy_signals":    len(buy_records),
             "n_sell_signals":   len(sell_records),
             "target_win_rate":  85.0,
+            "max_buy_same_date": top_date.get("n", 0),
+            "top_buy_date_share": top_date.get("share_pct", 0),
         },
         "window_results":       run.window_results or [],
         "false_buy_patterns":   run.false_buy_patterns or [],
         "false_sell_patterns":  run.false_sell_patterns or [],
         "monthly_performance":  monthly_perf,
+        "signal_date_concentration": date_concentration,
         "top_wins":             top_wins,
         "top_losses":           top_loses,
     }
@@ -91,6 +105,46 @@ def _monthly_performance(records: list) -> list:
         {"month": k, "avg_excess": round(sum(v) / len(v), 2), "n": len(v)}
         for k, v in sorted(monthly.items())
     ]
+
+
+def _pick_diversified_records(records) -> list:
+    from collections import defaultdict
+
+    picked = []
+    per_date = defaultdict(int)
+    for r in records:
+        key = r.signal_date
+        if per_date[key] >= TOP_CASES_MAX_PER_DATE:
+            continue
+        picked.append(r)
+        per_date[key] += 1
+        if len(picked) >= TOP_CASES_LIMIT:
+            break
+    return picked
+
+
+def _signal_date_concentration(records: list) -> list:
+    from collections import defaultdict
+
+    buckets = defaultdict(list)
+    for r in records:
+        if r.signal_date and r.excess_return is not None:
+            buckets[r.signal_date].append(r)
+
+    total = sum(len(v) for v in buckets.values())
+    rows = []
+    for signal_date, items in buckets.items():
+        n = len(items)
+        wins = sum(1 for r in items if r.is_win)
+        avg_excess = sum(r.excess_return for r in items) / n
+        rows.append({
+            "signal_date": str(signal_date),
+            "n": n,
+            "share_pct": round(n / total * 100, 2) if total else 0,
+            "win_rate": round(wins / n * 100, 2) if n else 0,
+            "avg_excess": round(avg_excess, 2),
+        })
+    return sorted(rows, key=lambda x: (-x["n"], x["signal_date"]))[:20]
 
 
 def _record_to_dict(r: BacktestRecord) -> dict:

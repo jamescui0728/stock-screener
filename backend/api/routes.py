@@ -10,12 +10,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import get_current_user
+from auth import get_current_user, get_current_admin
 from backtest.engine import run_backtest
 from backtest.evaluator import compare_runs, get_run_report
 from backtest.optimizer import optimize
 from backtest.progress import get_progress
-from config import get_settings_dict, save_settings
+from config import get_settings_dict, save_settings, settings
 from data.fetcher import (
     fetch_all_financial_data, fetch_all_price_data, fetch_macro_data,
     fetch_stock_industry_mapping, fetch_stock_news,
@@ -108,7 +108,7 @@ def list_stocks(
     ),
     short_signal_group: Optional[str] = Query(
         None,
-        description="短期信号聚合过滤（buy / sell），语义同 signal_group（v200 新增）",
+        description="短期信号聚合过滤（buy / sell / watch），语义同 signal_group（v200 新增）",
     ),
     min_fundamental: float        = Query(0.0),
     min_composite:   float        = Query(0.0),
@@ -176,18 +176,34 @@ def list_stocks(
             q = q.filter(Stock.short_signal.in_(("BUY", "STRONG_BUY")))
         elif sg == "sell":
             q = q.filter(Stock.short_signal.in_(("SELL", "STRONG_SELL")))
+        elif sg in ("watch", "candidate", "trend_blocked"):
+            q = q.filter(
+                Stock.short_signal == "HOLD",
+                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
+            )
         else:
-            raise HTTPException(400, f"short_signal_group 仅支持 buy / sell，收到 {short_signal_group!r}")
+            raise HTTPException(400, f"short_signal_group 仅支持 buy / sell / watch，收到 {short_signal_group!r}")
     elif short_signal:
-        q = q.filter_by(short_signal=short_signal.upper())
+        ss = short_signal.upper()
+        if ss in ("WATCH", "CANDIDATE", "TREND_BLOCKED"):
+            q = q.filter(
+                Stock.short_signal == "HOLD",
+                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
+            )
+        else:
+            q = q.filter_by(short_signal=ss)
     if min_fundamental > 0:
         q = q.filter(Stock.fundamental_score >= min_fundamental)
     if min_composite > 0:
         q = q.filter(Stock.composite_score >= min_composite)
 
     total = q.count()
-    stocks = q.order_by(Stock.composite_score.desc().nullslast())\
-              .offset((page - 1) * limit).limit(limit).all()
+    order_col = (
+        Stock.short_composite_score.desc().nullslast()
+        if short_signal_group or short_signal
+        else Stock.composite_score.desc().nullslast()
+    )
+    stocks = q.order_by(order_col).offset((page - 1) * limit).limit(limit).all()
 
     # 批量取行业评分，避免 N+1 查询
     industry_scores = _get_industry_score_map(db)
@@ -625,6 +641,24 @@ def paper_rules():
     }
 
 
+# ── v202g 自动跟单 ────────────────────────────────────────
+@router.get("/paper/auto-follow/performance")
+def auto_follow_performance(db: Session = Depends(get_db)):
+    """v202g 自动跟单账户的绩效快照（无认证 — 系统账户公开可查）"""
+    from engines.auto_follow import get_performance
+    return get_performance(db)
+
+
+@router.post("/paper/auto-follow/run")
+def auto_follow_trigger(
+    db: Session = Depends(get_db),
+    _admin = Depends(get_current_admin),   # 仅管理员可触发：写操作 + 重计算昂贵
+):
+    """手动触发一次自动跟单（凌晨 cron 之外的补救入口；仅管理员）"""
+    from engines.auto_follow import run_v202g_auto_follow
+    return run_v202g_auto_follow(db)
+
+
 # /paper/cache/warmup 节流：每 user 5 秒一次（防多 tab/window 同时连点暴打 sina）
 _WARMUP_THROTTLE_SEC = 5.0
 _warmup_last_at: dict[int, float] = {}
@@ -1049,11 +1083,18 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_signal":           s.short_signal,
         "short_signal_reason":    s.short_signal_reason,
         "short_signal_updated":   str(s.short_signal_updated) if s.short_signal_updated else None,
-        "short_score_momentum":   s.short_score_momentum,
-        "short_score_volprice":   s.short_score_volprice,
-        "short_score_macro":      s.short_score_macro,
-        "short_score_tech":       s.short_score_tech,
-        "short_score_news_heat":  s.short_score_news_heat,
+        "short_score_momentum":           s.short_score_momentum,
+        "short_score_volprice":           s.short_score_volprice,
+        "short_score_macro":              s.short_score_macro,
+        "short_score_tech":               s.short_score_tech,
+        "short_score_news_heat":          s.short_score_news_heat,
+        "short_score_industry_relative":  s.short_score_industry_relative,
+        "short_score_pricing_power":      s.short_score_pricing_power,
+        "short_observe_candidate": (
+            s.short_signal == "HOLD"
+            and s.short_composite_score is not None
+            and s.short_composite_score >= settings.SHORT_BUY_THRESHOLD
+        ),
     }
 
 

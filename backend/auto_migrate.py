@@ -58,6 +58,8 @@ COLUMN_ADDS = [
 # (index_name, table, columns_csv)
 INDEX_CREATES = [
     ("ix_backtest_runs_signal_type", "backtest_runs", "signal_type"),
+    ("ix_price_data_stock_date", "price_data", "stock_code, trade_date"),
+    ("ix_news_items_stock_pub_date", "news_items", "stock_code, pub_date"),
 ]
 
 

@@ -29,21 +29,52 @@ scheduler = AsyncIOScheduler()
 # 定时任务
 # ──────────────────────────────────────────────
 def _daily_data_update():
-    """每天凌晨 2 点：宏观数据 → 财报 → 情感分析 → 长期信号 → 短期信号"""
-    from data.fetcher import fetch_macro_data, fetch_all_financial_data
+    """
+    每天凌晨 2 点的全量数据更新链路：
+      1. 价格数据（A 股 + 沪深300 基准）— v202h 加入，之前漏了导致信号用陈旧价
+      2. 宏观数据
+      3. 财报数据
+      4. 新闻情感分析
+      5. 长期信号 + 短期信号
+    """
+    from data.fetcher import fetch_macro_data, fetch_all_financial_data, fetch_all_price_data
     from data.sentiment import analyze_all_news
     from engines.signal_engine import generate_all_signals
     from engines.short_signal_engine import generate_all_short_signals
+    from backtest.engine import ensure_benchmark_data
 
     db = SessionLocal()
     try:
         logger.info("定时任务：开始每日数据更新")
+
+        # 1. 价格 — A 股全市场增量（仅补 max(trade_date)+1 到今天）
+        try:
+            r = fetch_all_price_data(db, mode="incremental")
+            logger.info(f"定时任务：价格增量 {r}")
+        except Exception as e:
+            logger.error(f"定时任务：价格增量失败: {e}")
+
+        # 1b. 沪深300 基准（之前永不更新的 bug 已修，这里再保一道）
+        try:
+            ensure_benchmark_data(db)
+            logger.info("定时任务：沪深300 基准已增量")
+        except Exception as e:
+            logger.error(f"定时任务：基准增量失败: {e}")
+
         fetch_macro_data(db)
         fetch_all_financial_data(db, limit=200)
         analyze_all_news(db)
         generate_all_signals(db)
-        # v200 加入：短期信号也需要每日刷新（依赖最新宏观 + 价格 + 新闻）
         generate_all_short_signals(db)
+
+        # v202h：自动跟单（在信号刷新之后跑）
+        try:
+            from engines.auto_follow import run_v202g_auto_follow
+            r = run_v202g_auto_follow(db)
+            logger.info(f"v202g 自动跟单：买 {r['bought_n']} / 卖 {r['sold_n']} / 跳过 {r['skipped_n']}")
+        except Exception as e:
+            logger.error(f"v202g 自动跟单失败：{e}")
+
         logger.info("定时任务：每日更新完成")
     except Exception as e:
         logger.error(f"定时任务失败: {e}")
@@ -51,30 +82,75 @@ def _daily_data_update():
         db.close()
 
 
-def _weekday_refresh_watchlist_news():
-    """工作日 09:00：汇总所有用户自选股的最新消息"""
+def _weekday_refresh_news():
+    """
+    工作日 09:00：刷新关键股票的新闻。
+    范围（v202h 扩展）：
+      1. 所有用户自选股（保持原行为）
+      2. 全部科技板块 active 股票（TECH_INDUSTRIES，~450 只）
+         — 为后续短期信号"科技板块上调舆情权重"打数据基础
+      3. 当前 BUY / STRONG_BUY 候选（~30 只，已经被信号挑出来的）
+    去重后约 500-700 只 / 天，每只 0.5s 节流，总耗时 ~5-10 分钟
+    """
+    import time as _time
     from data.fetcher import fetch_stock_news
     from data.sentiment import analyze_all_news
-    from models.models import Watchlist
+    from models.models import Watchlist, Stock
+    from config import settings as _s
 
     db = SessionLocal()
     try:
-        # 收集所有用户的自选股代码（去重），避免多用户重复抓取
-        codes = {r[0] for r in db.query(Watchlist.stock_code).distinct().all()}
+        watchlist_codes = {r[0] for r in db.query(Watchlist.stock_code).distinct().all()}
+
+        # 科技板块 active stocks
+        tech_codes = {
+            r[0] for r in
+            db.query(Stock.code)
+            .filter(Stock.is_active == True, Stock.industry_code.in_(_s.TECH_INDUSTRIES))
+            .all()
+        }
+
+        # 当前 BUY 候选（依赖最新 short_signal 状态）
+        buy_codes = {
+            r[0] for r in
+            db.query(Stock.code)
+            .filter(Stock.is_active == True,
+                    Stock.short_signal.in_(("BUY", "STRONG_BUY")))
+            .all()
+        }
+
+        codes = watchlist_codes | tech_codes | buy_codes
         if not codes:
-            logger.info("定时任务：自选股为空，跳过新闻刷新")
+            logger.info("定时任务：无目标股票，跳过新闻刷新")
             return
-        logger.info(f"定时任务：开始刷新 {len(codes)} 只自选股的消息")
-        fetched = analyzed = 0
-        for code in codes:
+        logger.info(
+            f"定时任务：开始刷新新闻 — 自选 {len(watchlist_codes)} + "
+            f"科技板块 {len(tech_codes)} + BUY 候选 {len(buy_codes)} "
+            f"= 去重 {len(codes)} 只"
+        )
+
+        fetched = analyzed = failed = 0
+        t0 = _time.time()
+        for i, code in enumerate(codes, 1):
             try:
                 fetched  += fetch_stock_news(db, code)
                 analyzed += analyze_all_news(db, code)
             except Exception as e:
-                logger.warning(f"  ↳ {code} 刷新失败: {e}")
-        logger.info(f"定时任务：自选股消息刷新完成（新增 {fetched} 条，分析 {analyzed} 条）")
+                failed += 1
+                logger.debug(f"  ↳ {code} 新闻失败: {e}")
+            # 节流：避免打爆 API（东财/新浪日内有频率限制）
+            _time.sleep(0.5)
+            # 进度日志：每 100 只 + 末次
+            if i % 100 == 0 or i == len(codes):
+                logger.info(
+                    f"  进度 {i}/{len(codes)} 已用时 {(_time.time()-t0)/60:.1f}min"
+                )
+        logger.info(
+            f"定时任务：新闻刷新完成 — 新增 {fetched} 条，分析 {analyzed} 条，"
+            f"失败 {failed} 只，耗时 {(_time.time()-t0)/60:.1f}min"
+        )
     except Exception as e:
-        logger.error(f"自选股消息定时刷新失败: {e}")
+        logger.error(f"新闻定时刷新失败: {e}")
     finally:
         db.close()
 
@@ -164,8 +240,8 @@ async def lifespan(app: FastAPI):
         day_of_week="sun", hour=3, minute=0, id="weekly_rescore",
     )
     scheduler.add_job(
-        _weekday_refresh_watchlist_news, "cron",
-        day_of_week="mon-fri", hour=9, minute=0, id="weekday_watchlist_news",
+        _weekday_refresh_news, "cron",
+        day_of_week="mon-fri", hour=9, minute=0, id="weekday_news_refresh",
     )
     # A 股交易时段精细预热持仓实时价（每 8 分钟一次，缓存 TTL 10 分钟，永不过期）
     # 早盘段 9:00-11:59（覆盖正式交易 9:30-11:30 + 集合竞价前 30 分钟 + 午休 30 分钟内的盘后价）

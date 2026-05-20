@@ -323,6 +323,30 @@
             <v-chart :option="monthlyChartOption" style="height:200px" autoresize />
           </el-card>
 
+          <!-- 信号日期集中度 -->
+          <el-card v-if="report.signal_date_concentration?.length" style="margin:16px 0">
+            <template #header>信号日期集中度（买入信号）</template>
+            <el-table :data="report.signal_date_concentration" size="small" max-height="260">
+              <el-table-column label="信号日" width="110">
+                <template #default="{ row }">{{ row.signal_date?.slice(0,10) }}</template>
+              </el-table-column>
+              <el-table-column prop="n" label="数量" width="70" />
+              <el-table-column label="占比" width="80">
+                <template #default="{ row }">{{ fmtPct(row.share_pct) }}</template>
+              </el-table-column>
+              <el-table-column label="胜率" width="80">
+                <template #default="{ row }">{{ fmtPct(row.win_rate) }}</template>
+              </el-table-column>
+              <el-table-column label="平均超额收益">
+                <template #default="{ row }">
+                  <span :class="(row.avg_excess || 0) >= 0 ? 'text-green' : 'text-red'">
+                    {{ signedPct(row.avg_excess) }}
+                  </span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
           <!-- Top 胜出 / 败出案例 -->
           <el-row :gutter="16">
             <el-col :span="12">
@@ -544,8 +568,8 @@ async function loadRuns() {
       if (tb !== ta) return tb - ta
       return (b.run_id || 0) - (a.run_id || 0)
     })
-    // 只保留最近 2 个版本（保持原有简洁版本卡）
-    runs.value = sorted.slice(0, 2)
+    // 保留更多历史版本，方便查看本轮调参与性能优化产生的对照 run。
+    runs.value = sorted.slice(0, 20)
   }
   finally { loadingRuns.value = false }
 }
@@ -569,6 +593,7 @@ const summaryMetrics = computed(() => {
     { label: '最大回撤',  value: '-'+fmtPct(s.max_drawdown), cls: (s.max_drawdown||0)<15?'green':'red' },
     { label: '买入信号数', value: s.n_buy_signals || 0 },
     { label: '卖出信号数', value: s.n_sell_signals || 0 },
+    { label: '最大单日占比', value: fmtPct(s.top_buy_date_share || 0), cls: (s.top_buy_date_share||0)>50?'orange':'green' },
     { label: '优化综合分', value: fmtNum(s.composite_score, 4) },
   ]
 })
@@ -667,6 +692,7 @@ const monthlyChartOption = computed(() => {
 // ── 工具函数 ──
 function fmtPct(v)     { return v != null ? v.toFixed(1) + '%' : '-' }
 function fmtNum(v, d=2){ return v != null ? v.toFixed(d) : '-' }
+function signedPct(v)  { return v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` : '-' }
 function winRateClass(v){ return (v||0)>=85?'green':(v||0)>=70?'orange':'red' }
 function weakestDim(sub) {
   if (!sub) return '-'
