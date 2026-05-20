@@ -20,8 +20,11 @@ from database import SessionLocal
 from engines.signal_engine import generate_signal
 from engines.short_signal_engine import (
     generate_short_signal,
+    compute_recent_price_cache,
+    compute_stock_returns_from_price_cache,
     compute_industry_returns_at,
     compute_industry_avg_gm,
+    score_market_trend,
     _apply_cross_sectional_ranks,
 )
 from models.models import BacktestRecord, BacktestRun, PriceData, Stock
@@ -30,7 +33,10 @@ from backtest.progress import get_progress, reset as reset_progress
 # 长期信号的 sub_scores 维度（用于误差归因饼图）
 LONG_DIMS  = ("fundamental", "valuation", "sentiment", "macro")
 # 短期信号的 sub_scores 维度
-SHORT_DIMS = ("momentum", "volprice", "macro", "tech", "news_heat", "industry_relative", "pricing_power")
+SHORT_DIMS = (
+    "momentum", "volprice", "macro", "tech", "news_heat",
+    "industry_relative", "pricing_power", "market_trend",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,14 +321,17 @@ def _run_window(
         keep = set(target_codes)
         stocks = [s for s in stocks if s.code in keep]
 
-    # 短期回测：行业毛利率缓存（全窗口共享，变化极慢）
-    industry_gm = compute_industry_avg_gm(db) if signal_type == "short" else None
+    # v202g: pricing_power 权重为 0 时跳过 industry_gm 预计算（省 90% 时间）
+    from config import settings as _s
+    need_gm = signal_type == "short" and _s.SHORT_PRICING_POWER_WEIGHT > 0
 
     for check_date in check_dates:
         if prog:
             prog.push_log(f"  检查日 {check_date}（{len(stocks)} 只）")
 
         if signal_type == "short":
+            # 只有需要 pricing_power 时才 per-check_date 重算（避免 look-ahead）
+            industry_gm = compute_industry_avg_gm(db, as_of_date=check_date) if need_gm else None
             _run_short_check_date(
                 db, run_id, check_date, hold_days, stocks, params, records,
                 industry_gm=industry_gm,
@@ -340,7 +349,14 @@ def _run_window(
 def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, records,
                           industry_gm=None):
     """短期回测：两阶段（raw → 截面排名 → BacktestRecord）"""
-    ind_returns_at_date = compute_industry_returns_at(db, check_date)
+    price_cache = compute_recent_price_cache(db, check_date)
+    stock_returns = compute_stock_returns_from_price_cache(price_cache)
+    industry_price_cache = compute_recent_price_cache(db, check_date, lookback_days=45)
+    industry_stock_returns = compute_stock_returns_from_price_cache(industry_price_cache)
+    ind_returns_at_date = compute_industry_returns_at(
+        db, check_date, _cached_stock_returns=industry_stock_returns
+    )
+    market_trend = score_market_trend(db, check_date)
 
     raw_short = {}
     for stock in stocks:
@@ -353,6 +369,9 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
                 _cached_stock=stock,
                 _cached_industry_returns=ind_returns_at_date,
                 _cached_industry_gm=industry_gm,
+                _cached_prices=price_cache,
+                _cached_stock_returns=stock_returns,
+                _cached_market_trend=market_trend,
             )
             if r:
                 raw_short[stock.code] = r
@@ -362,7 +381,8 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
     if settings.SHORT_USE_CROSS_SECTIONAL_RANKS:
         _apply_cross_sectional_ranks(raw_short)
 
-    for code, result in raw_short.items():
+    selected = _select_tradeable_short_results(raw_short)
+    for code, result in selected:
         rec = _signal_to_record(
             db, run_id, code, check_date, hold_days,
             signal=result.get("short_signal"),
@@ -373,6 +393,38 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
         if rec:
             db.add(rec)
             records.append(rec)
+
+
+def _select_tradeable_short_results(raw_short: dict) -> list[tuple[str, dict]]:
+    """
+    Keep all sell signals, but cap same-day buy signals by rank.
+
+    Without this, a single market event day can produce dozens of BUY rows and
+    dominate the backtest as if each row were an independent opportunity.
+    """
+    buy_items = []
+    other_items = []
+    for code, result in raw_short.items():
+        signal = result.get("short_signal")
+        item = (code, result)
+        if signal in ("BUY", "STRONG_BUY"):
+            buy_items.append(item)
+        else:
+            other_items.append(item)
+
+    def buy_rank(item):
+        code, result = item
+        signal = result.get("short_signal")
+        score = result.get("short_composite_score")
+        signal_rank = 0 if signal == "STRONG_BUY" else 1
+        return (signal_rank, -(score or 0), code)
+
+    max_buy = getattr(settings, "SHORT_MAX_BUY_PER_CHECK_DATE", 0) or 0
+    buy_items = sorted(buy_items, key=buy_rank)
+    if max_buy > 0:
+        buy_items = buy_items[:max_buy]
+
+    return other_items + buy_items
 
 
 def _run_long_check_date(db, run_id, check_date, hold_days, stocks, params, records):
@@ -406,19 +458,25 @@ def _signal_to_record(db, run_id, stock_code, check_date, hold_days,
     """信号 → 价格查询 → 超额收益计算 → BacktestRecord（或 None）"""
     if signal not in ("BUY", "SELL", "STRONG_BUY", "STRONG_SELL"):
         return None
-    exit_date = check_date + timedelta(days=hold_days)
+    entry_price = _get_next_price(db, stock_code, check_date, prefer_open=True)
+    bench_entry = _get_next_price(db, BENCHMARK_CODE, check_date, prefer_open=True)
+    if not entry_price:
+        return None
+
+    # 信号在 check_date 收盘后才可知，回测从下一交易日成交开始计持有期。
+    # 这样避免用同一根 K 线既生成信号又成交的 look-ahead / execution bias。
+    entry_trade_date = entry_price[1]
+    exit_date = entry_trade_date + timedelta(days=hold_days)
     if exit_date > date.today():
         return None
-    entry_price = _get_price(db, stock_code, check_date)
-    exit_price  = _get_price(db, stock_code, exit_date)
-    bench_entry = _get_benchmark_price(db, check_date)
-    bench_exit  = _get_benchmark_price(db, exit_date)
-    if not entry_price or not exit_price:
+    exit_price = _get_price_on_or_after(db, stock_code, exit_date)
+    bench_exit = _get_price_on_or_after(db, BENCHMARK_CODE, exit_date)
+    if not exit_price:
         return None
-    stock_ret = (exit_price - entry_price) / entry_price
+    stock_ret = (exit_price[0] - entry_price[0]) / entry_price[0]
     bench_ret = (
-        (bench_exit - bench_entry) / bench_entry
-        if bench_entry and bench_exit and bench_entry != 0 else 0.0
+        (bench_exit[0] - bench_entry[0]) / bench_entry[0]
+        if bench_entry and bench_exit and bench_entry[0] != 0 else 0.0
     )
     excess_ret = stock_ret - bench_ret
     is_buy_signal = signal in ("BUY", "STRONG_BUY")
@@ -429,8 +487,8 @@ def _signal_to_record(db, run_id, stock_code, check_date, hold_days,
         signal_date=check_date,
         signal=signal,
         composite_score=composite_score,
-        entry_price=entry_price,
-        exit_price=exit_price,
+        entry_price=entry_price[0],
+        exit_price=exit_price[0],
         hold_days=hold_days,
         stock_return=round(stock_ret * 100, 4),
         bench_return=round(bench_ret * 100, 4),
@@ -542,17 +600,68 @@ def _get_price(db: Session, code: str, target_date: date) -> Optional[float]:
     return row.close if row else None
 
 
+def _row_price(row: PriceData, prefer_open: bool = False) -> Optional[float]:
+    """Return a usable execution price from a PriceData row."""
+    if not row:
+        return None
+    primary = row.open if prefer_open else row.close
+    fallback = row.close if prefer_open else row.open
+    if primary and primary > 0:
+        return primary
+    if fallback and fallback > 0:
+        return fallback
+    return None
+
+
+def _get_next_price(
+    db: Session, code: str, after_date: date, prefer_open: bool = False
+) -> Optional[tuple[float, date]]:
+    """First available trading price strictly after after_date."""
+    row = (
+        db.query(PriceData)
+        .filter(PriceData.stock_code == code, PriceData.trade_date > after_date)
+        .order_by(PriceData.trade_date.asc())
+        .first()
+    )
+    px = _row_price(row, prefer_open=prefer_open)
+    return (px, row.trade_date) if px is not None else None
+
+
+def _get_price_on_or_after(
+    db: Session, code: str, target_date: date, prefer_open: bool = False
+) -> Optional[tuple[float, date]]:
+    """First available trading price on or after target_date."""
+    row = (
+        db.query(PriceData)
+        .filter(PriceData.stock_code == code, PriceData.trade_date >= target_date)
+        .order_by(PriceData.trade_date.asc())
+        .first()
+    )
+    px = _row_price(row, prefer_open=prefer_open)
+    return (px, row.trade_date) if px is not None else None
+
+
 BENCHMARK_CODE = "IDX_000300"   # 沪深300 在 PriceData 中的虚拟代码
 
 def _get_benchmark_price(db: Session, target_date: date) -> Optional[float]:
     return _get_price(db, BENCHMARK_CODE, target_date)
 
 
-def ensure_benchmark_data(db: Session):
-    """确保沪深300指数数据已入库（回测必需）"""
+def ensure_benchmark_data(db: Session, force_refresh: bool = False):
+    """
+    确保沪深300指数数据已入库（回测必需）。
+    v202h-fix: 默认增量更新（之前只在首次插入，导致基准数据卡住不更新）。
+    force_refresh=True 时强制拉全量，否则只补 latest 之后的新数据。
+    """
     existing = db.query(PriceData).filter_by(stock_code=BENCHMARK_CODE).count()
-    if existing > 100:
-        return   # 已有数据
+    if existing == 0:
+        pass  # 首次，下面拉全量
+    elif not force_refresh:
+        # 已有数据 → 检查最新日期，若已是今天则跳过；否则拉增量
+        from sqlalchemy import func as _func
+        latest = db.query(_func.max(PriceData.trade_date)).filter_by(stock_code=BENCHMARK_CODE).scalar()
+        if latest and (date.today() - latest).days < 1:
+            return   # 今天已更新
     try:
         import akshare as ak
         import concurrent.futures as _cf

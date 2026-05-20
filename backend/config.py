@@ -91,25 +91,32 @@ class Settings(BaseSettings):
     # 未来若加入正交因子（盈利惊喜 / 内幕交易 / 期权偏度等）可重新打开。
     SHORT_USE_CROSS_SECTIONAL_RANKS: bool = False
 
-    # v202b+ 生产配置（IC=+0.108, win=50.4%，加定价权 v202f）
+    # v202g 生产配置：拿掉 pricing_power（run 65 诊断 IC=-0.019，std=1.6 几乎无区分度）
+    # 把 0.10 还给 industry_relative（最强 IC=+0.134），合计仍是 1.0
     SHORT_MOMENTUM_WEIGHT:           float = 0.00
     SHORT_VOLPRICE_WEIGHT:           float = 0.40
     SHORT_MACRO_WEIGHT:              float = 0.30
     SHORT_TECH_WEIGHT:               float = 0.05
     SHORT_NEWS_HEAT_WEIGHT:          float = 0.00
-    SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.15
-    SHORT_PRICING_POWER_WEIGHT:      float = 0.10
+    SHORT_INDUSTRY_RELATIVE_WEIGHT:  float = 0.25
+    SHORT_PRICING_POWER_WEIGHT:      float = 0.00   # 保留 0 权重作为未来重设计 hook
     # 总和必须 = 1.0
 
-    # v202e 阈值（目标 BUY 胜率 ≥ 85%）：
-    # 精度分析（run 56, 15d cycle）：
-    #   composite ≥ 71 → 胜率 88.2%（n=68， 平均超额 +10.11%）
-    #   composite ≥ 73 → 胜率更高，更稀疏
-    # 信号稀疏（~68 个 BUY/年），用户需等待高分共振
+    # v202g 阈值（目标 BUY 胜率 ≥ 85%）：
+    # 拿掉 pricing_power 后 composite 分布右移 ~1 分，原 71/73 阈值精度被稀释，
+    # run 66 精度分析重新校准：
+    #   composite ≥ 72.5 → 胜率 86.7%（n=75/3 年 ≈ 25/年，平均超额 +6.52%）
+    #   composite ≥ 73   → 胜率 89%+（n≈37/3 年 ≈ 12/年）
     SHORT_STRONG_BUY_THRESHOLD:  float = 73.0
-    SHORT_BUY_THRESHOLD:         float = 71.0
+    SHORT_BUY_THRESHOLD:         float = 72.5
     SHORT_SELL_THRESHOLD:        float = 38.0
     SHORT_STRONG_SELL_THRESHOLD: float = 28.0
+    # v202i：短期反转只在市场短线趋势转暖时接。run#44 修复成交价后显示：
+    # 沪深300 20 日涨幅 >= 3% 时 BUY 胜率 85.7%（n=63），否则容易变成弱市接刀。
+    SHORT_MARKET_TREND_MIN_20D:  float = 3.0
+    # 单个检查日最多纳入的短线买入信号数。避免同一市场事件日批量信号被当作独立样本；
+    # 每天最多新增 5 只，也给 100 万账户 / 5 万单票仓位留下跨日期分散空间。
+    SHORT_MAX_BUY_PER_CHECK_DATE: int = 5
 
     # 科技 / 政策催化白名单（行业代码用 BK 前缀，对应 industries 表）
     # 这些行业获得短期"科技板块"满分基础，再叠加行业评分
@@ -146,6 +153,13 @@ class Settings(BaseSettings):
     # 短期默认 train=1.5/val=0.5（共 2 年），从 today-4y 起算可得到 ~3 个窗口。
     BACKTEST_TRAIN_YEARS_SHORT: float = 1.5
     BACKTEST_VAL_YEARS_SHORT:   float = 0.5
+
+    # v202h 自动跟单（v202g 信号 → 模拟盘）
+    AUTO_FOLLOW_ACCOUNT_NAME:    str   = "v202g 自动跟单"
+    AUTO_FOLLOW_NOTE_TAG:        str   = "v202g-auto"
+    AUTO_FOLLOW_HOLD_DAYS:       int   = 15      # 与 BACKTEST_HOLD_DAYS_SHORT 对齐
+    AUTO_FOLLOW_POSITION_YUAN:   float = 50_000  # 每只目标买入金额
+    AUTO_FOLLOW_INITIAL_CASH:    float = 1_000_000
 
     # 回测优化目标
     OPT_W_WIN_RATE: float = 0.50
