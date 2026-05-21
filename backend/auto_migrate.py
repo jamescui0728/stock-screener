@@ -129,6 +129,16 @@ def run_auto_migrations(db: Session) -> dict:
             db.rollback()
             logger.error(f"auto_migrate: 索引 {idx_name} 失败: {e}")
 
+    for idx_name, sql in PARTIAL_INDEX_CREATES:
+        _validate_ident(idx_name)
+        try:
+            db.execute(text(sql))
+            db.commit()
+            added_indexes.append(idx_name)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"auto_migrate: 部分索引 {idx_name} 失败: {e}")
+
     result = {
         "added_cols":    added_cols,
         "added_indexes": added_indexes,

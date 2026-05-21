@@ -177,19 +177,13 @@ def list_stocks(
         elif sg == "sell":
             q = q.filter(Stock.short_signal.in_(("SELL", "STRONG_SELL")))
         elif sg in ("watch", "candidate", "trend_blocked"):
-            q = q.filter(
-                Stock.short_signal == "HOLD",
-                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
-            )
+            q = _apply_short_watch_filter(q)
         else:
             raise HTTPException(400, f"short_signal_group 仅支持 buy / sell / watch，收到 {short_signal_group!r}")
     elif short_signal:
         ss = short_signal.upper()
         if ss in ("WATCH", "CANDIDATE", "TREND_BLOCKED"):
-            q = q.filter(
-                Stock.short_signal == "HOLD",
-                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
-            )
+            q = _apply_short_watch_filter(q)
         else:
             q = q.filter_by(short_signal=ss)
     if min_fundamental > 0:
@@ -1068,6 +1062,16 @@ def _get_industry_score_map(db: Session) -> dict:
     """返回 {industry_code: {total_score, name}} 的字典，批量避免 N+1"""
     rows = db.query(Industry.code, Industry.name, Industry.total_score).all()
     return {r.code: {"name": r.name, "total_score": r.total_score} for r in rows}
+
+
+def _apply_short_watch_filter(q):
+    from engines.short_signal_engine import MARKET_TREND_BLOCK_HINT
+    return q.filter(
+        Stock.short_signal == "HOLD",
+        Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
+        Stock.short_signal_reason.isnot(None),
+        Stock.short_signal_reason.contains(MARKET_TREND_BLOCK_HINT),
+    )
 
 
 def _short_observe_candidate(s: Stock) -> bool:

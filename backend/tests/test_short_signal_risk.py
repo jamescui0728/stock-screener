@@ -3,8 +3,10 @@ import unittest
 from datetime import date, timedelta
 
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
+from auto_migrate import run_auto_migrations
 from config import settings
 from database import Base
 from engines.short_signal_engine import (
@@ -110,6 +112,41 @@ class TestScoreMarketTrend(unittest.TestCase):
 class TestAutoFollowCaps(unittest.TestCase):
     def test_max_open_positions_config(self):
         self.assertGreaterEqual(getattr(settings, "AUTO_FOLLOW_MAX_OPEN_POSITIONS", 0), 1)
+
+
+class TestAutoMigrate(unittest.TestCase):
+    def test_partial_index_is_created(self):
+        engine = create_engine("sqlite:///:memory:")
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        try:
+            db.execute(text("CREATE TABLE stocks (id INTEGER PRIMARY KEY)"))
+            db.execute(text("CREATE TABLE backtest_runs (id INTEGER PRIMARY KEY)"))
+            db.execute(text("CREATE TABLE backtest_records (id INTEGER PRIMARY KEY)"))
+            db.execute(text(
+                "CREATE TABLE price_data ("
+                "id INTEGER PRIMARY KEY, stock_code VARCHAR(20), trade_date DATE)"
+            ))
+            db.execute(text(
+                "CREATE TABLE news_items ("
+                "id INTEGER PRIMARY KEY, stock_code VARCHAR(20), pub_date DATETIME)"
+            ))
+            db.execute(text(
+                "CREATE TABLE paper_account ("
+                "id INTEGER PRIMARY KEY, user_id INTEGER, name VARCHAR(50))"
+            ))
+            db.commit()
+
+            result = run_auto_migrations(db)
+            rows = db.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='ix_paper_account_system_name'"
+            )).fetchall()
+
+            self.assertEqual(len(rows), 1)
+            self.assertIn("ix_paper_account_system_name", result["added_indexes"])
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":
