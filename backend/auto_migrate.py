@@ -62,6 +62,15 @@ INDEX_CREATES = [
     ("ix_news_items_stock_pub_date", "news_items", "stock_code, pub_date"),
 ]
 
+# (index_name, create_sql) — 部分索引无法用 columns_csv 表达
+PARTIAL_INDEX_CREATES = [
+    (
+        "ix_paper_account_system_name",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_paper_account_system_name "
+        "ON paper_account(name) WHERE user_id IS NULL",
+    ),
+]
+
 
 def _existing_columns(db: Session, table: str) -> set:
     """读取 SQLite 当前表的列集合。表不存在则返回 None（让外层判断）。"""

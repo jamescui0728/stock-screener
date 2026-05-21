@@ -267,7 +267,7 @@ def score_volprice(
 def score_market_trend(db: Session, as_of_date=None) -> dict:
     """
     沪深300短线趋势。短期反转模型在大盘 20 日趋势转暖时胜率更稳定；
-    数据缺失时返回 pass=True，避免因基准缺数据误杀所有信号。
+    基准 K 线不足时 fail-closed（pass=False），避免弱市误放行 BUY。
     """
     cutoff = as_of_date or datetime.utcnow().date()
     rows = (
@@ -279,12 +279,13 @@ def score_market_trend(db: Session, as_of_date=None) -> dict:
     )
     closes = [r.close for r in reversed(rows) if r.close]
     if len(closes) < 21:
-        return {"pass": True, "ret_20d": None, "ret_60d": None}
+        return {"pass": False, "data_ok": False, "ret_20d": None, "ret_60d": None}
 
     ret_20d = closes[-1] / closes[-21] - 1
     ret_60d = (closes[-1] / closes[-61] - 1) if len(closes) >= 61 else None
     return {
         "pass":    ret_20d * 100 >= settings.SHORT_MARKET_TREND_MIN_20D,
+        "data_ok": True,
         "ret_20d": round(ret_20d * 100, 2),
         "ret_60d": round(ret_60d * 100, 2) if ret_60d is not None else None,
     }
@@ -674,6 +675,47 @@ def score_pricing_power(
 # ════════════════════════════════════════════════════════════════
 # 7. 综合短期信号
 # ════════════════════════════════════════════════════════════════
+SHORT_RET_5D_STRONG_SELL_PCT = -10.0
+MARKET_TREND_BLOCK_HINT = "市场短线趋势未达反转买入门槛"
+
+
+def _neutral_momentum() -> dict:
+    return {
+        "score": 50.0, "ret_5d": None, "ret_20d": None, "ret_60d": None,
+        "above_ma20": None, "above_ma60": None, "rsi14": None,
+    }
+
+
+def classify_short_signal(
+    composite: float,
+    ret_5d_pct: Optional[float],
+    market: dict,
+) -> str:
+    if ret_5d_pct is not None and ret_5d_pct <= SHORT_RET_5D_STRONG_SELL_PCT:
+        return "STRONG_SELL"
+    if composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
+        signal = "STRONG_BUY"
+    elif composite >= settings.SHORT_BUY_THRESHOLD:
+        signal = "BUY"
+    elif composite >= settings.SHORT_SELL_THRESHOLD:
+        signal = "HOLD"
+    elif composite >= settings.SHORT_STRONG_SELL_THRESHOLD:
+        signal = "SELL"
+    else:
+        signal = "STRONG_SELL"
+    if signal in ("BUY", "STRONG_BUY") and not market.get("pass", False):
+        signal = "HOLD"
+    return signal
+
+
+def short_signal_blocked_by_market(signal: str, reason: Optional[str]) -> bool:
+    return (
+        signal == "HOLD"
+        and reason is not None
+        and MARKET_TREND_BLOCK_HINT in reason
+    )
+
+
 def generate_short_signal(
     db: Session, stock_code: str, as_of_date=None,
     write_back: bool = True,
@@ -706,7 +748,9 @@ def generate_short_signal(
     # 7 维评分
     mom = score_momentum(db, stock_code, as_of_date, _cached_prices=_cached_prices)
     if mom is None:
-        return None   # 价格数据不足，没法算
+        if settings.SHORT_MOMENTUM_WEIGHT > 0:
+            return None
+        mom = _neutral_momentum()
 
     vp = score_volprice(db, stock_code, as_of_date, _cached_prices=_cached_prices)
     if vp is None:
@@ -757,21 +801,9 @@ def generate_short_signal(
     )
     composite = round(max(0, min(100, composite)), 2)
 
-    # ── 5 等级判定（v201：反转模型）──
-    if composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
-        signal = "STRONG_BUY"
-    elif composite >= settings.SHORT_BUY_THRESHOLD:
-        signal = "BUY"
-    elif composite >= settings.SHORT_SELL_THRESHOLD:
-        signal = "HOLD"
-    elif composite >= settings.SHORT_STRONG_SELL_THRESHOLD:
-        signal = "SELL"
-    else:
-        signal = "STRONG_SELL"
     market = _cached_market_trend if _cached_market_trend is not None else \
              score_market_trend(db, as_of_date)
-    if signal in ("BUY", "STRONG_BUY") and not market["pass"]:
-        signal = "HOLD"
+    signal = classify_short_signal(composite, mom.get("ret_5d"), market)
     reason = _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, ind_rel, pp, market)
 
     result = {
@@ -901,14 +933,17 @@ def _build_short_reason(signal, composite, mom, vp, macro_100, tech, news_heat, 
     elif signal == "BUY":
         parts.append("→ 短线看涨（反转机会）")
     elif signal == "HOLD":
-        if market and not market.get("pass", True):
-            parts.append("→ 观望（市场短线趋势未达反转买入门槛）")
+        if market and not market.get("pass", False):
+            parts.append(f"→ 观望（{MARKET_TREND_BLOCK_HINT}）")
         else:
             parts.append("→ 观望")
     elif signal == "SELL":
         parts.append("→ 短线回避（涨幅过快或宏观偏弱）")
-    else:
-        parts.append("→ 强烈回避（过热 + 宏观偏弱）")
+    elif signal == "STRONG_SELL":
+        if mom.get("ret_5d") is not None and mom["ret_5d"] <= SHORT_RET_5D_STRONG_SELL_PCT:
+            parts.append(f"→ 强烈回避（5日跌幅 {mom['ret_5d']:+.1f}% 触发急跌风控）")
+        else:
+            parts.append("→ 强烈回避（过热 + 宏观偏弱）")
 
     return "。".join(parts) + "。"
 
@@ -994,18 +1029,8 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
         )
         composite = round(max(0, min(100, composite)), 2)
 
-        if composite >= settings.SHORT_STRONG_BUY_THRESHOLD:
-            signal = "STRONG_BUY"
-        elif composite >= settings.SHORT_BUY_THRESHOLD:
-            signal = "BUY"
-        elif composite >= settings.SHORT_SELL_THRESHOLD:
-            signal = "HOLD"
-        elif composite >= settings.SHORT_STRONG_SELL_THRESHOLD:
-            signal = "SELL"
-        else:
-            signal = "STRONG_SELL"
-        if signal in ("BUY", "STRONG_BUY") and sub.get("market_trend") == 0.0:
-            signal = "HOLD"
+        market_stub = {"pass": sub.get("market_trend", 0.0) >= 50.0}
+        signal = classify_short_signal(composite, None, market_stub)
 
         # 更新 sub_scores 为 ranked 形式（便于诊断脚本直接读）
         result["sub_scores"] = {
@@ -1028,6 +1053,8 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
 
 def _build_ranked_reason(signal, composite, sub) -> str:
     parts = [f"短期信号（截面排名）：综合分 {composite}"]
+    if signal == "HOLD" and sub.get("market_trend", 50.0) < 50.0:
+        parts.append(f"→ 观望（{MARKET_TREND_BLOCK_HINT}）")
     def _label(name, v):
         if v >= 80:  return f"{name}前 20%"
         if v >= 60:  return f"{name}前 40%"

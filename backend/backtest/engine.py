@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal
-from engines.signal_engine import generate_signal
+from engines.signal_engine import generate_signal, score_macro
 from engines.short_signal_engine import (
     generate_short_signal,
     compute_recent_price_cache,
@@ -357,6 +357,7 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
         db, check_date, _cached_stock_returns=industry_stock_returns
     )
     market_trend = score_market_trend(db, check_date)
+    macro_100 = score_macro(db, check_date) / 15 * 100
 
     raw_short = {}
     for stock in stocks:
@@ -366,6 +367,7 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
                 as_of_date=check_date,
                 write_back=False,
                 commit=False,
+                _cached_macro_100=macro_100,
                 _cached_stock=stock,
                 _cached_industry_returns=ind_returns_at_date,
                 _cached_industry_gm=industry_gm,
