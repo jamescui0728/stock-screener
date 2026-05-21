@@ -11,6 +11,7 @@ v202g 自动跟单引擎
 通过 PaperTransaction 的 note 字段标记 "v202g-auto" 便于绩效分析。
 """
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from collections import defaultdict
 from typing import Optional
@@ -24,6 +25,8 @@ from models.models import PaperAccount, PaperPosition, PaperTransaction, Stock
 
 logger = logging.getLogger(__name__)
 
+_auto_account_lock = threading.Lock()
+
 
 def get_or_create_auto_account(db: Session) -> PaperAccount:
     """
@@ -32,25 +35,35 @@ def get_or_create_auto_account(db: Session) -> PaperAccount:
     注意：filter_by(user_id=None) 在 SQLAlchemy 里**翻译成 `=NULL`**（不会匹配任何行），
     必须用显式 `user_id.is_(None)` 才是 SQL `IS NULL`。
     """
-    acct = db.query(PaperAccount).filter(
-        PaperAccount.user_id.is_(None),
-        PaperAccount.name == settings.AUTO_FOLLOW_ACCOUNT_NAME,
-    ).first()
-    if acct:
+    with _auto_account_lock:
+        acct = db.query(PaperAccount).filter(
+            PaperAccount.user_id.is_(None),
+            PaperAccount.name == settings.AUTO_FOLLOW_ACCOUNT_NAME,
+        ).first()
+        if acct:
+            return acct
+        acct = PaperAccount(
+            user_id=None,
+            name=settings.AUTO_FOLLOW_ACCOUNT_NAME,
+            initial_cash=settings.AUTO_FOLLOW_INITIAL_CASH,
+            cash_balance=settings.AUTO_FOLLOW_INITIAL_CASH,
+        )
+        db.add(acct)
+        try:
+            db.commit()
+            db.refresh(acct)
+        except Exception:
+            db.rollback()
+            acct = db.query(PaperAccount).filter(
+                PaperAccount.user_id.is_(None),
+                PaperAccount.name == settings.AUTO_FOLLOW_ACCOUNT_NAME,
+            ).first()
+            if not acct:
+                raise
+        logger.info(
+            f"创建自动跟单账户 id={acct.id}（初始资金 {settings.AUTO_FOLLOW_INITIAL_CASH}）"
+        )
         return acct
-    acct = PaperAccount(
-        user_id=None,
-        name=settings.AUTO_FOLLOW_ACCOUNT_NAME,
-        initial_cash=settings.AUTO_FOLLOW_INITIAL_CASH,
-        cash_balance=settings.AUTO_FOLLOW_INITIAL_CASH,
-    )
-    db.add(acct)
-    db.commit()
-    db.refresh(acct)
-    logger.info(
-        f"创建自动跟单账户 id={acct.id}（初始资金 {settings.AUTO_FOLLOW_INITIAL_CASH}）"
-    )
-    return acct
 
 
 def _shares_for_target_amount(price: float, target_amount: float) -> int:
@@ -126,7 +139,11 @@ def run_v202g_auto_follow(db: Session) -> dict:
     }
 
     max_new_buys = max(0, getattr(settings, "SHORT_MAX_BUY_PER_CHECK_DATE", 0) or 0)
+    max_open = max(1, int(getattr(settings, "AUTO_FOLLOW_MAX_OPEN_POSITIONS", 20) or 20))
     for stock in candidates:
+        if len(held_codes) + len(bought) >= max_open:
+            skipped.append({"code": stock.code, "reason": f"max_open_positions_{max_open}"})
+            continue
         if max_new_buys and len(bought) >= max_new_buys:
             skipped.append({"code": stock.code, "reason": f"daily_buy_cap_{max_new_buys}"})
             continue
@@ -161,7 +178,7 @@ def run_v202g_auto_follow(db: Session) -> dict:
                 "signal": stock.short_signal,
                 "composite": stock.short_composite_score,
             })
-            # 刷新 cash_balance（pt_buy 已 commit）
+            held_codes.add(stock.code)
             db.refresh(acct)
         except Exception as e:
             errors.append({"action": "buy", "code": stock.code, "err": str(e)})

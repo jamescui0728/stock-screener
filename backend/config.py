@@ -160,6 +160,7 @@ class Settings(BaseSettings):
     AUTO_FOLLOW_HOLD_DAYS:       int   = 15      # 与 BACKTEST_HOLD_DAYS_SHORT 对齐
     AUTO_FOLLOW_POSITION_YUAN:   float = 50_000  # 每只目标买入金额
     AUTO_FOLLOW_INITIAL_CASH:    float = 1_000_000
+    AUTO_FOLLOW_MAX_OPEN_POSITIONS: int = 20    # 并发持仓上限（≈ 初始资金 / 单票金额）
 
     # 回测优化目标
     OPT_W_WIN_RATE: float = 0.50

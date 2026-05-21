@@ -177,19 +177,13 @@ def list_stocks(
         elif sg == "sell":
             q = q.filter(Stock.short_signal.in_(("SELL", "STRONG_SELL")))
         elif sg in ("watch", "candidate", "trend_blocked"):
-            q = q.filter(
-                Stock.short_signal == "HOLD",
-                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
-            )
+            q = _apply_short_watch_filter(q)
         else:
             raise HTTPException(400, f"short_signal_group 仅支持 buy / sell / watch，收到 {short_signal_group!r}")
     elif short_signal:
         ss = short_signal.upper()
         if ss in ("WATCH", "CANDIDATE", "TREND_BLOCKED"):
-            q = q.filter(
-                Stock.short_signal == "HOLD",
-                Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
-            )
+            q = _apply_short_watch_filter(q)
         else:
             q = q.filter_by(short_signal=ss)
     if min_fundamental > 0:
@@ -933,7 +927,7 @@ def refresh_all_data(background_tasks: BackgroundTasks):
     """一键触发：宏观数据 → 行业重新评分 → 长期信号 → 短期信号"""
     from database import SessionLocal as _SL
     from data.task_tracker import start_refresh, mark_task
-    TASKS = ["宏观数据", "行业评分", "长期信号刷新", "短期信号刷新"]
+    TASKS = ["宏观数据", "行业评分", "长期信号刷新", "短期信号刷新", "自动跟单"]
     start_refresh(TASKS)
 
     def _run():
@@ -976,6 +970,17 @@ def refresh_all_data(background_tasks: BackgroundTasks):
                           f"成功 {r['generated']} / 跳过 {r['skipped']} / 共 {r['total']} / 耗时 {r['elapsed_sec']}s")
             except Exception as e:
                 mark_task("短期信号刷新", "error", str(e))
+
+            mark_task("自动跟单", "running")
+            try:
+                from engines.auto_follow import run_v202g_auto_follow
+                af = run_v202g_auto_follow(_db)
+                mark_task(
+                    "自动跟单", "done",
+                    f"买 {af['bought_n']} / 卖 {af['sold_n']} / 跳过 {af['skipped_n']}",
+                )
+            except Exception as e:
+                mark_task("自动跟单", "error", str(e))
         finally:
             _db.close()
 
@@ -1059,6 +1064,25 @@ def _get_industry_score_map(db: Session) -> dict:
     return {r.code: {"name": r.name, "total_score": r.total_score} for r in rows}
 
 
+def _apply_short_watch_filter(q):
+    from engines.short_signal_engine import MARKET_TREND_BLOCK_HINT
+    return q.filter(
+        Stock.short_signal == "HOLD",
+        Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
+        Stock.short_signal_reason.isnot(None),
+        Stock.short_signal_reason.contains(MARKET_TREND_BLOCK_HINT),
+    )
+
+
+def _short_observe_candidate(s: Stock) -> bool:
+    from engines.short_signal_engine import short_signal_blocked_by_market
+    return (
+        s.short_composite_score is not None
+        and s.short_composite_score >= settings.SHORT_BUY_THRESHOLD
+        and short_signal_blocked_by_market(s.short_signal, s.short_signal_reason)
+    )
+
+
 def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
     ind_info = (industry_map or {}).get(s.industry_code, {}) if s.industry_code else {}
     return {
@@ -1090,11 +1114,7 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_score_news_heat":          s.short_score_news_heat,
         "short_score_industry_relative":  s.short_score_industry_relative,
         "short_score_pricing_power":      s.short_score_pricing_power,
-        "short_observe_candidate": (
-            s.short_signal == "HOLD"
-            and s.short_composite_score is not None
-            and s.short_composite_score >= settings.SHORT_BUY_THRESHOLD
-        ),
+        "short_observe_candidate": _short_observe_candidate(s),
     }
 
 
