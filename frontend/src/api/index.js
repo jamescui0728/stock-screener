@@ -169,3 +169,10 @@ export const settingsApi = {
   save:  (body)   => http.put('/settings', body),
   reset: ()       => http.post('/settings/reset'),
 }
+
+// ── 自动跟单 ──
+export const autoFollowApi = {
+  performance:  ()              => http.get('/paper/auto-follow/performance'),
+  transactions: (limit = 500)   => http.get('/paper/auto-follow/transactions', { params: { limit } }),
+  run:          ()              => http.post('/paper/auto-follow/run'),
+}

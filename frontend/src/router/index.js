@@ -55,6 +55,12 @@ const routes = [
     meta: { title: '回测中心' },
   },
   {
+    path: '/auto-follow',
+    name: 'AutoFollow',
+    component: () => import('@/views/AutoFollow.vue'),
+    meta: { title: '自动跟单' },
+  },
+  {
     path: '/settings',
     name: 'Settings',
     component: () => import('@/views/Settings.vue'),
@@ -74,7 +80,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
-  document.title = `${to.meta.title || ''} — 长期价值股票筛选`
+  document.title = `${to.meta.title || ''} — 好股雷达`
 
   // 未登录时：除公共页面外，一律跳登录
   const auth = useAuthStore()

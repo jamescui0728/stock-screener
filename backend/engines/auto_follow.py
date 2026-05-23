@@ -25,6 +25,9 @@ from models.models import PaperAccount, PaperPosition, PaperTransaction, Stock
 
 logger = logging.getLogger(__name__)
 
+# 进程内并发保护：防止同一进程内多线程同时建账户。
+# 跨进程保护（多 Gunicorn worker 场景）靠 DB 层的部分唯一索引
+# ix_paper_account_system_name（auto_migrate 建立），INSERT 冲突后重查。
 _auto_account_lock = threading.Lock()
 
 

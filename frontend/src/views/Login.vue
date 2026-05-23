@@ -3,7 +3,7 @@
     <div class="auth-card">
       <div class="auth-logo">
         <el-icon size="28" color="#409eff"><TrendCharts /></el-icon>
-        <span>长期价值筛选</span>
+        <span>好股雷达</span>
       </div>
       <h2 class="auth-title">登录</h2>
       <p class="auth-sub">使用手机号和密码登录你的账户</p>

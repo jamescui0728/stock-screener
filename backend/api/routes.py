@@ -643,6 +643,42 @@ def auto_follow_performance(db: Session = Depends(get_db)):
     return get_performance(db)
 
 
+@router.get("/paper/auto-follow/transactions")
+def auto_follow_transactions(
+    limit: int = 500,
+    db: Session = Depends(get_db),
+):
+    """v202g 自动跟单账户的交易流水（无认证 — 系统账户公开可查）"""
+    from engines.auto_follow import get_or_create_auto_account
+    from models.models import PaperTransaction
+    from config import settings
+    acct = get_or_create_auto_account(db)
+    txns = (
+        db.query(PaperTransaction)
+        .filter(
+            PaperTransaction.account_id == acct.id,
+            PaperTransaction.note.like(f"%{settings.AUTO_FOLLOW_NOTE_TAG}%"),
+        )
+        .order_by(PaperTransaction.trade_time.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id":           t.id,
+            "side":         t.side,
+            "stock_code":   t.stock_code,
+            "shares":       t.shares,
+            "price":        float(t.price) if t.price is not None else None,
+            "amount":       float(t.amount) if t.amount is not None else None,
+            "realized_pnl": float(t.realized_pnl) if t.realized_pnl is not None else None,
+            "note":         t.note,
+            "trade_time":   str(t.trade_time) if t.trade_time else None,
+        }
+        for t in txns
+    ]
+
+
 @router.post("/paper/auto-follow/run")
 def auto_follow_trigger(
     db: Session = Depends(get_db),

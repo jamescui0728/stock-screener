@@ -680,6 +680,13 @@ MARKET_TREND_BLOCK_HINT = "市场短线趋势未达反转买入门槛"
 
 
 def _neutral_momentum() -> dict:
+    """
+    当 SHORT_MOMENTUM_WEIGHT = 0 且价格数据不足时返回中性占位。
+    ret_5d=None 意味着 classify_short_signal 中的 5日急跌 veto 不会触发——
+    这是有意行为：无价格数据时无法验证是否急跌，不应拦截信号。
+    若 SHORT_MOMENTUM_WEIGHT > 0，价格不足时 generate_short_signal 会直接返回 None，
+    本函数不会被调用。
+    """
     return {
         "score": 50.0, "ret_5d": None, "ret_20d": None, "ret_60d": None,
         "above_ma20": None, "above_ma60": None, "rsi14": None,
@@ -1029,6 +1036,8 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
         )
         composite = round(max(0, min(100, composite)), 2)
 
+        # sub_scores["market_trend"] 的编码约定：市场过滤通过 → 100.0，否则 → 0.0
+        # （见 generate_short_signal 写入处）。>= 50.0 等效于 == 100.0。
         market_stub = {"pass": sub.get("market_trend", 0.0) >= 50.0}
         signal = classify_short_signal(composite, None, market_stub)
 
@@ -1053,23 +1062,42 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
 
 def _build_ranked_reason(signal, composite, sub) -> str:
     parts = [f"短期信号（截面排名）：综合分 {composite}"]
-    if signal == "HOLD" and sub.get("market_trend", 50.0) < 50.0:
-        parts.append(f"→ 观望（{MARKET_TREND_BLOCK_HINT}）")
+
     def _label(name, v):
         if v >= 80:  return f"{name}前 20%"
         if v >= 60:  return f"{name}前 40%"
         if v >= 40:  return f"{name}中游"
         if v >= 20:  return f"{name}后 40%"
         return f"{name}后 20%"
+
     parts.append(_label("动量", sub["momentum"]))
     parts.append(_label("量价", sub["volprice"]))
     parts.append(_label("行业相对", sub["industry_relative"]))
     parts.append(_label("行业", sub["tech"]))
     parts.append(f"宏观 {sub['macro']:.0f}")
-    op = {"STRONG_BUY": "→ 强烈看涨", "BUY": "→ 短线看涨",
-          "HOLD": "→ 观望", "SELL": "→ 短线回避", "STRONG_SELL": "→ 强烈回避"}.get(signal, "")
-    if op:
-        parts.append(op)
+
+    # 市场趋势状态
+    market_passed = sub.get("market_trend", 0.0) >= 50.0
+    if not market_passed:
+        parts.append(f"市场趋势：未通过（{MARKET_TREND_BLOCK_HINT}）")
+    else:
+        parts.append("市场趋势：通过")
+
+    # 操作建议
+    if signal == "STRONG_BUY":
+        parts.append("→ 强烈看涨（截面排名领先 + 市场趋势共振）")
+    elif signal == "BUY":
+        parts.append("→ 短线看涨（截面排名较高 + 市场趋势通过）")
+    elif signal == "HOLD":
+        if not market_passed:
+            parts.append(f"→ 观望（{MARKET_TREND_BLOCK_HINT}）")
+        else:
+            parts.append("→ 观望（截面排名居中）")
+    elif signal == "SELL":
+        parts.append("→ 短线回避（截面排名偏高，超买风险）")
+    elif signal == "STRONG_SELL":
+        parts.append("→ 强烈回避（截面排名极高，过热信号）")
+
     return "。".join(parts) + "。"
 
 
