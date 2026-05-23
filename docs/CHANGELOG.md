@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-05-23
+
+### v202g 自动跟单引擎（信号 → 模拟盘）
+
+新增 `backend/engines/auto_follow.py`：系统级账户（`user_id IS NULL`，初始 100 万）每天 cron 在短期信号刷新后自动执行：
+
+- **卖出**：持仓达到 `AUTO_FOLLOW_HOLD_DAYS`（15 天，与回测持有期对齐）的票全部平仓
+- **买入**：新出现的 BUY/STRONG_BUY 信号，STRONG_BUY 优先、按 composite 降序，每只固定 `AUTO_FOLLOW_POSITION_YUAN`（5 万）整手买入
+- **跳过保护**：已持仓 / 当日已卖（T+1）/ 现金不足 / 无报价 / 超当日买入上限，均记入 `skipped` 不报错
+- **交易标记**：`PaperTransaction.note` 打 `v202g-auto` 标签便于绩效分析
+
+新增 API：
+- `GET /paper/auto-follow/performance` — 账户绩效快照（NAV / 胜率 / 持仓，公开可查）
+- `POST /paper/auto-follow/run` — 手动触发一次（仅管理员）
+- `/data/refresh-all` 在短期信号刷新后顺带跑一次自动跟单，与凌晨 cron 行为一致
+
+并发安全：`get_or_create_auto_account` 加进程内线程锁 + 提交失败重查；跨进程靠 `auto_migrate` 建立的部分唯一索引 `ix_paper_account_system_name`（`user_id IS NULL` 时 `name` 唯一）兜底。
+
+### 短期信号风控加固
+
+- **大盘趋势 fail-closed**：沪深300 基准 K 线不足 21 根时 `score_market_trend` 返回 `pass=False`，不再误放行 BUY（弱市接刀）。沪深300 20 日涨幅 ≥ `SHORT_MARKET_TREND_MIN_20D`（3%）才允许买入
+- **5 日急跌 veto**：`ret_5d ≤ -10%` 时统一经 `classify_short_signal` 强制 `STRONG_SELL`
+- **动量权重为 0**：缺动量数据时用中性占位，不再整只跳过
+- **观察候选 bucket**：被市场过滤降级为 HOLD 但 composite ≥ 阈值的高分票，通过 `/api/stocks?short_signal_group=watch` 单独暴露，前端不再隐藏机会池
+
+### v202g 权重 / 阈值重校准
+
+`run 65` 诊断显示 pricing_power 几乎无区分度（IC=-0.019），拿掉它把 0.10 权重还给最强的 industry_relative：
+
+| 因子 | 旧权重 | 新权重 |
+|---|---|---|
+| industry_relative | 0.15 | 0.25 |
+| pricing_power | 0.10 | 0.00（保留 hook） |
+
+阈值随分布右移重新校准（`run 66`）：`SHORT_BUY_THRESHOLD` 71 → 72.5（胜率 86.7%，n≈25/年）。
+
+### 回测：消除 look-ahead / execution bias
+
+- **成交价改用次日**：信号在 check_date 收盘后才可知，回测从下一交易日开盘价成交并计持有期，避免同一根 K 线既出信号又成交
+- **财报可见性截断**：`compute_industry_avg_gm` / `score_pricing_power` 加 `as_of_date - REPORT_LAG_DAYS` 上界，回测不再看到未公开的财报
+- **沪深300 基准增量更新**：`ensure_benchmark_data` 默认增量补到今天（之前只在首次插入，基准数据卡死）
+
+### 回测：同日买入上限 + 日期集中度报告
+
+- `SHORT_MAX_BUY_PER_CHECK_DATE`（5）：单个检查日最多纳入 5 个买入信号，避免一个市场事件日批量信号被当作独立样本霸屏（`_select_tradeable_short_results`，SELL 不限）
+- 报告新增 `signal_date_concentration`，Top 案例每个信号日最多展示 3 条（`_pick_diversified_records`）
+
+### 回测性能优化
+
+- `compute_recent_price_cache` 批量预加载价格窗口，momentum / volprice / industry_relative 复用，省掉 per-stock 重复查询
+- 每个检查日预计算 `market_trend`、`industry_gm`，pricing_power 权重为 0 时直接跳过 `industry_gm`（省 ~90% 时间）
+- 新增索引 `ix_price_data_stock_date`、`ix_news_items_stock_pub_date`
+
+### 前端：菜单点击无响应修复
+
+**问题**：Docker 部署后侧边栏菜单点击完全无反应（URL/页面均不变）。
+
+**根因**：nginx 对 `index.html` 未设 `Cache-Control`，浏览器缓存旧 `index.html` → 加载过期 JS bundle → 路由逻辑失效。
+
+**解决**：
+- `nginx.conf` 对 `/index.html` 加 `no-cache, no-store, must-revalidate`（哈希化的 JS/CSS 仍保留 1 年强缓存）
+- `App.vue` 给 `.aside` 加 `position: relative; z-index: 1`，防御性确保侧边栏独立层叠上下文
+
+### 测试 / 工程化
+
+- 新增 `backend/tests/test_short_signal_risk.py`（22 个用例）：信号分类、市场趋势打分、同日买入限额与 STRONG_BUY 优先、整手计算、自动跟单跳过逻辑、auto_migrate 部分唯一索引
+- 新增根目录 `CLAUDE.md`（8 条协作行为约束）
+- Colima 配置中国镜像加速器（`docker.1panel.live` 等），解决 Docker Hub 拉取超时
+
+---
+
 ## 2026-05-07
 
 ### 实时价缓存预热（消除模拟盘首次加载的 6-10 秒延迟）
