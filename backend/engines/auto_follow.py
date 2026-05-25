@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # ix_paper_account_system_name（auto_migrate 建立），INSERT 冲突后重查。
 _auto_account_lock = threading.Lock()
 
+# 运行级锁：防止 cron / refresh-all / 管理员手动触发在同一进程内并发，
+# 两次都通过现金/持仓检查从而重复买入。非阻塞——已在跑就直接跳过本次。
+# 注意：仅进程内保护；多 Gunicorn worker 的跨进程并发尚未防护（需 DB advisory lock）。
+_auto_follow_run_lock = threading.Lock()
+
 
 def get_or_create_auto_account(db: Session) -> PaperAccount:
     """
@@ -81,11 +86,29 @@ def run_v202g_auto_follow(db: Session) -> dict:
     """
     每日跟单核心逻辑。返回执行摘要：
       {"sold": [...], "bought": [...], "skipped": [...], "errors": [...]}
+
+    运行级锁包装：cron / refresh-all / 管理员手动触发可能并发，加非阻塞锁，
+    已在跑则直接返回 already_running，避免重复买入。
     """
+    if not _auto_follow_run_lock.acquire(blocking=False):
+        logger.info("v202g 自动跟单已在运行，跳过本次重复触发")
+        return {
+            "skipped_reason": "already_running",
+            "sold_n": 0, "bought_n": 0, "skipped_n": 0, "errors_n": 0,
+            "sold": [], "bought": [], "skipped": [], "errors": [],
+        }
+    try:
+        return _run_v202g_auto_follow_locked(db)
+    finally:
+        _auto_follow_run_lock.release()
+
+
+def _run_v202g_auto_follow_locked(db: Session) -> dict:
+    """实际跟单逻辑（已持有 _auto_follow_run_lock）。"""
     acct = get_or_create_auto_account(db)
-    # 容器 TZ=Asia/Shanghai；date.today() 走系统时区，避免 utcnow() 在 22:00-08:00
-    # 把"今天"算成昨天，从而把刚建仓的持仓算多 1 天。
-    today = date.today()
+    # 时间口径统一用 UTC：opened_at / trade_time 入库均为 datetime.utcnow()，
+    # 这里也用 utcnow().date() 比较，避免本地(UTC+8)与 UTC 混用导致 held_days 偏差 1 天。
+    today = datetime.utcnow().date()
 
     sold, bought, skipped, errors = [], [], [], []
 
@@ -235,7 +258,8 @@ def get_performance(db: Session) -> dict:
         PaperPosition.account_id == acct.id, PaperPosition.shares > 0
     ).all()
     pos_snapshot = []
-    today = date.today()
+    # 与 opened_at（datetime.utcnow 入库）口径一致，统一用 UTC 日期算 held_days。
+    today = datetime.utcnow().date()
     for p in positions:
         cur = _get_latest_price(db, p.stock_code)
         market_value = (cur * p.shares) if cur else None

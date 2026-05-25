@@ -1039,7 +1039,9 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
         # sub_scores["market_trend"] 的编码约定：市场过滤通过 → 100.0，否则 → 0.0
         # （见 generate_short_signal 写入处）。>= 50.0 等效于 == 100.0。
         market_stub = {"pass": sub.get("market_trend", 0.0) >= 50.0}
-        signal = classify_short_signal(composite, None, market_stub)
+        # 复用原始动量里的 ret_5d（百分比），让 5 日急跌 veto 在 ranked 输出上同样生效。
+        ret_5d_pct = ((result.get("details") or {}).get("momentum") or {}).get("ret_5d")
+        signal = classify_short_signal(composite, ret_5d_pct, market_stub)
 
         # 更新 sub_scores 为 ranked 形式（便于诊断脚本直接读）
         result["sub_scores"] = {

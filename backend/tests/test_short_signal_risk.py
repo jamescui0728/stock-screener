@@ -12,6 +12,7 @@ from config import settings
 from database import Base
 from engines.short_signal_engine import (
     MARKET_TREND_BLOCK_HINT,
+    _apply_cross_sectional_ranks,
     classify_short_signal,
     score_market_trend,
     short_signal_blocked_by_market,
@@ -48,6 +49,35 @@ class TestObserveCandidate(unittest.TestCase):
 
     def test_plain_hold_not_observe(self):
         self.assertFalse(short_signal_blocked_by_market("HOLD", "→ 观望。"))
+
+
+class TestCrossSectionalRankCrashVeto(unittest.TestCase):
+    """ranked 路径也必须触发 5 日急跌 veto（回归 Bugbot: Ranking skips crash veto）。"""
+
+    def _result(self, ret_5d_pct):
+        # sub_scores 给满足高分的占位；details.momentum.ret_5d 控制 veto
+        sub = {
+            "momentum": 80.0, "volprice": 80.0, "tech": 80.0,
+            "industry_relative": 80.0, "macro": 80.0,
+            "news_heat": 50.0, "pricing_power": 50.0,
+            "market_trend": 100.0,
+        }
+        return {
+            "short_composite_score": 80.0,
+            "short_signal": "STRONG_BUY",
+            "short_signal_reason": "",
+            "sub_scores": dict(sub),
+            "details": {"momentum": {"ret_5d": ret_5d_pct}},
+        }
+
+    def test_crash_stock_becomes_strong_sell_after_ranking(self):
+        raw = {
+            "CRASH": self._result(-12.0),   # 5 日急跌 → 必须 STRONG_SELL
+            "OKAY":  self._result(1.0),      # 正常 → 不被 veto
+        }
+        ranked = _apply_cross_sectional_ranks(raw)
+        self.assertEqual(ranked["CRASH"]["short_signal"], "STRONG_SELL")
+        self.assertNotEqual(ranked["OKAY"]["short_signal"], "STRONG_SELL")
 
 
 class TestScoreMarketTrend(unittest.TestCase):
