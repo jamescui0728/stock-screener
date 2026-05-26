@@ -637,8 +637,11 @@ def paper_rules():
 
 # ── v202g 自动跟单 ────────────────────────────────────────
 @router.get("/paper/auto-follow/performance")
-def auto_follow_performance(db: Session = Depends(get_db)):
-    """v202g 自动跟单账户的绩效快照（无认证 — 系统账户公开可查）"""
+def auto_follow_performance(
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),   # 需登录：暴露系统账户持仓/盈亏
+):
+    """v202g 自动跟单账户的绩效快照（需登录）"""
     from engines.auto_follow import get_performance
     return get_performance(db)
 
@@ -647,11 +650,13 @@ def auto_follow_performance(db: Session = Depends(get_db)):
 def auto_follow_transactions(
     limit: int = 500,
     db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),   # 需登录：暴露系统账户逐笔流水
 ):
-    """v202g 自动跟单账户的交易流水（无认证 — 系统账户公开可查）"""
+    """v202g 自动跟单账户的交易流水（需登录）"""
     from engines.auto_follow import get_or_create_auto_account
     from models.models import PaperTransaction
     from config import settings
+    limit = min(max(1, limit), 1000)   # 上界防止超大查询拉爆内存
     acct = get_or_create_auto_account(db)
     txns = (
         db.query(PaperTransaction)
