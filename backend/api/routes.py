@@ -653,11 +653,13 @@ def auto_follow_transactions(
     _user: User = Depends(get_current_user),   # 需登录：暴露系统账户逐笔流水
 ):
     """v202g 自动跟单账户的交易流水（需登录）"""
-    from engines.auto_follow import get_or_create_auto_account
+    from engines.auto_follow import _get_auto_account
     from models.models import PaperTransaction
     from config import settings
     limit = min(max(1, limit), 1000)   # 上界防止超大查询拉爆内存
-    acct = get_or_create_auto_account(db)
+    acct = _get_auto_account(db)        # 只读：账户未建立时返回空列表，不建账户
+    if acct is None:
+        return []
     txns = (
         db.query(PaperTransaction)
         .filter(

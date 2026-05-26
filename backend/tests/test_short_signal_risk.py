@@ -338,5 +338,31 @@ class TestAutoFollowSkipLogic(unittest.TestCase):
             db.close()
 
 
+class TestAutoFollowReadOnlyGet(unittest.TestCase):
+    """只读 GET 路径不应建账户（回归 issue #5: write-on-GET）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(cls.engine)
+        cls.Session = sessionmaker(bind=cls.engine)
+
+    def test_get_performance_empty_db_creates_no_account(self):
+        from engines.auto_follow import get_performance, _get_auto_account
+        from models.models import PaperAccount
+
+        db = self.Session()
+        try:
+            self.assertIsNone(_get_auto_account(db))
+            perf = get_performance(db)
+            self.assertIsNone(perf["account_id"])
+            self.assertEqual(perf["n_open"], 0)
+            self.assertEqual(perf["positions"], [])
+            # 关键：读路径没有写库建账户
+            self.assertEqual(db.query(PaperAccount).count(), 0)
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

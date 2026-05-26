@@ -74,6 +74,37 @@ def get_or_create_auto_account(db: Session) -> PaperAccount:
         return acct
 
 
+def _get_auto_account(db: Session) -> Optional[PaperAccount]:
+    """只读查询系统跟单账户，不存在返回 None（不建账户）。
+
+    供只读 GET 端点使用，避免在读路径上写库（write-on-GET）。建账户只发生在
+    run_v202g_auto_follow（cron / 管理员 POST）。
+    """
+    return db.query(PaperAccount).filter(
+        PaperAccount.user_id.is_(None),
+        PaperAccount.name == settings.AUTO_FOLLOW_ACCOUNT_NAME,
+    ).first()
+
+
+def _empty_performance() -> dict:
+    """账户尚未建立时的零值绩效快照。"""
+    return {
+        "account_id":         None,
+        "initial_cash":       settings.AUTO_FOLLOW_INITIAL_CASH,
+        "cash_balance":       settings.AUTO_FOLLOW_INITIAL_CASH,
+        "market_value":       0.0,
+        "nav":                settings.AUTO_FOLLOW_INITIAL_CASH,
+        "total_return":       0.0,
+        "n_buys":             0,
+        "n_sells":            0,
+        "n_open":             0,
+        "win_rate":           None,
+        "avg_realized_pnl":   0,
+        "total_realized_pnl": 0,
+        "positions":          [],
+    }
+
+
 def _shares_for_target_amount(price: float, target_amount: float) -> int:
     """按 100 整数倍 + 不超过 target_amount。"""
     if price <= 0:
@@ -119,6 +150,7 @@ def _run_v202g_auto_follow_locked(db: Session) -> dict:
 
     for pos in positions:
         opened = pos.opened_at.date() if pos.opened_at else today
+        # held 为自然日（非交易日），与回测 exit_date=entry+timedelta(days=N) 的口径一致（issue #4）
         held = (today - opened).days
         if held < settings.AUTO_FOLLOW_HOLD_DAYS:
             continue
@@ -236,8 +268,12 @@ def get_performance(db: Session) -> dict:
     - 总交易、买入、卖出、平均持仓天数
     - 已实现 PnL 统计（胜率、累计、平均、median）
     - 当前持仓快照
+
+    只读：账户未建立时返回零值快照，不在读路径上建账户。
     """
-    acct = get_or_create_auto_account(db)
+    acct = _get_auto_account(db)
+    if acct is None:
+        return _empty_performance()
 
     txns = db.query(PaperTransaction).filter(
         PaperTransaction.account_id == acct.id,
