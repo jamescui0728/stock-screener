@@ -113,7 +113,9 @@ class Settings(BaseSettings):
     SHORT_STRONG_SELL_THRESHOLD: float = 28.0
     # v202i：短期反转只在市场短线趋势转暖时接。run#44 修复成交价后显示：
     # 沪深300 20 日涨幅 >= 3% 时 BUY 胜率 85.7%（n=63），否则容易变成弱市接刀。
-    SHORT_MARKET_TREND_MIN_20D:  float = 3.0
+    # 2026-05 手动下调至 2.4%（放宽门槛、放更多候选进来），低于原 3% 的回测验证值，
+    # 建议改后重跑短期回测确认胜率未明显劣化。
+    SHORT_MARKET_TREND_MIN_20D:  float = 2.4
     # 单个检查日最多纳入的短线买入信号数。避免同一市场事件日批量信号被当作独立样本；
     # 每天最多新增 5 只，也给 100 万账户 / 5 万单票仓位留下跨日期分散空间。
     SHORT_MAX_BUY_PER_CHECK_DATE: int = 5
