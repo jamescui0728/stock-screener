@@ -58,6 +58,17 @@ COLUMN_ADDS = [
 # (index_name, table, columns_csv)
 INDEX_CREATES = [
     ("ix_backtest_runs_signal_type", "backtest_runs", "signal_type"),
+    ("ix_price_data_stock_date", "price_data", "stock_code, trade_date"),
+    ("ix_news_items_stock_pub_date", "news_items", "stock_code, pub_date"),
+]
+
+# (index_name, create_sql) — 部分索引无法用 columns_csv 表达
+PARTIAL_INDEX_CREATES = [
+    (
+        "ix_paper_account_system_name",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_paper_account_system_name "
+        "ON paper_account(name) WHERE user_id IS NULL",
+    ),
 ]
 
 
@@ -117,6 +128,16 @@ def run_auto_migrations(db: Session) -> dict:
         except Exception as e:
             db.rollback()
             logger.error(f"auto_migrate: 索引 {idx_name} 失败: {e}")
+
+    for idx_name, sql in PARTIAL_INDEX_CREATES:
+        _validate_ident(idx_name)
+        try:
+            db.execute(text(sql))
+            db.commit()
+            added_indexes.append(idx_name)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"auto_migrate: 部分索引 {idx_name} 失败: {e}")
 
     result = {
         "added_cols":    added_cols,

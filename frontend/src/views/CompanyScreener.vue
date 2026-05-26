@@ -26,6 +26,7 @@
           <el-select v-model="filter.short_signal" clearable placeholder="全部" style="width:120px">
             <el-option label="🟢 必买" value="STRONG_BUY" />
             <el-option label="🟢 买入" value="BUY" />
+            <el-option label="🟠 观察" value="WATCH" />
             <el-option label="🟡 持有" value="HOLD" />
             <el-option label="🔴 卖出" value="SELL" />
             <el-option label="🔴 必卖" value="STRONG_SELL" />
@@ -107,7 +108,14 @@
             </el-tooltip>
           </template>
           <template #default="{ row }">
-            <SignalBadge v-if="row.short_signal" :signal="row.short_signal" />
+            <el-tooltip
+              v-if="row.short_observe_candidate"
+              :content="row.short_signal_reason || '短期评分已达买入阈值，但市场趋势过滤未通过'"
+              placement="top"
+            >
+              <el-tag type="warning" effect="dark" size="small" class="observe-tag">观察</el-tag>
+            </el-tooltip>
+            <SignalBadge v-else-if="row.short_signal" :signal="row.short_signal" />
             <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
@@ -293,4 +301,5 @@ watch(() => route.query.industry, (v) => {
 }
 .industry-link:hover { text-decoration: underline; }
 .no-data { color: #c0c4cc; font-size: 13px; }
+.observe-tag { font-weight: 700; }
 </style>

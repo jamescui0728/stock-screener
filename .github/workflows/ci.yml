@@ -43,6 +43,10 @@ jobs:
             | xargs python -m py_compile
           echo "✓ All backend Python files compile"
 
+      - name: Run short-signal risk unit tests
+        working-directory: backend
+        run: python -m unittest tests.test_short_signal_risk -v
+
       - name: Import-test all top-level modules
         working-directory: backend
         run: |
@@ -52,7 +56,8 @@ jobs:
           os.environ['DATABASE_URL'] = 'sqlite:///:memory:'
           modules = ['config', 'database', 'auth', 'main',
                      'api.routes', 'api.auth_routes',
-                     'engines.signal_engine', 'engines.paper_trade',
+                     'engines.signal_engine', 'engines.short_signal_engine',
+                     'engines.auto_follow', 'engines.paper_trade',
                      'engines.company_scorer', 'engines.industry_scorer',
                      'data.fetcher', 'data.sentiment',
                      'backtest.engine', 'backtest.evaluator',

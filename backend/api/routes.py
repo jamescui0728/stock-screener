@@ -10,12 +10,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import get_current_user
+from auth import get_current_user, get_current_admin
 from backtest.engine import run_backtest
 from backtest.evaluator import compare_runs, get_run_report
 from backtest.optimizer import optimize
 from backtest.progress import get_progress
-from config import get_settings_dict, save_settings
+from config import get_settings_dict, save_settings, settings
 from data.fetcher import (
     fetch_all_financial_data, fetch_all_price_data, fetch_macro_data,
     fetch_stock_industry_mapping, fetch_stock_news,
@@ -108,7 +108,7 @@ def list_stocks(
     ),
     short_signal_group: Optional[str] = Query(
         None,
-        description="短期信号聚合过滤（buy / sell），语义同 signal_group（v200 新增）",
+        description="短期信号聚合过滤（buy / sell / watch），语义同 signal_group（v200 新增）",
     ),
     min_fundamental: float        = Query(0.0),
     min_composite:   float        = Query(0.0),
@@ -176,18 +176,28 @@ def list_stocks(
             q = q.filter(Stock.short_signal.in_(("BUY", "STRONG_BUY")))
         elif sg == "sell":
             q = q.filter(Stock.short_signal.in_(("SELL", "STRONG_SELL")))
+        elif sg in ("watch", "candidate", "trend_blocked"):
+            q = _apply_short_watch_filter(q)
         else:
-            raise HTTPException(400, f"short_signal_group 仅支持 buy / sell，收到 {short_signal_group!r}")
+            raise HTTPException(400, f"short_signal_group 仅支持 buy / sell / watch，收到 {short_signal_group!r}")
     elif short_signal:
-        q = q.filter_by(short_signal=short_signal.upper())
+        ss = short_signal.upper()
+        if ss in ("WATCH", "CANDIDATE", "TREND_BLOCKED"):
+            q = _apply_short_watch_filter(q)
+        else:
+            q = q.filter_by(short_signal=ss)
     if min_fundamental > 0:
         q = q.filter(Stock.fundamental_score >= min_fundamental)
     if min_composite > 0:
         q = q.filter(Stock.composite_score >= min_composite)
 
     total = q.count()
-    stocks = q.order_by(Stock.composite_score.desc().nullslast())\
-              .offset((page - 1) * limit).limit(limit).all()
+    order_col = (
+        Stock.short_composite_score.desc().nullslast()
+        if short_signal_group or short_signal
+        else Stock.composite_score.desc().nullslast()
+    )
+    stocks = q.order_by(order_col).offset((page - 1) * limit).limit(limit).all()
 
     # 批量取行业评分，避免 N+1 查询
     industry_scores = _get_industry_score_map(db)
@@ -625,6 +635,65 @@ def paper_rules():
     }
 
 
+# ── v202g 自动跟单 ────────────────────────────────────────
+@router.get("/paper/auto-follow/performance")
+def auto_follow_performance(
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),   # 需登录：暴露系统账户持仓/盈亏
+):
+    """v202g 自动跟单账户的绩效快照（需登录）"""
+    from engines.auto_follow import get_performance
+    return get_performance(db)
+
+
+@router.get("/paper/auto-follow/transactions")
+def auto_follow_transactions(
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),   # 需登录：暴露系统账户逐笔流水
+):
+    """v202g 自动跟单账户的交易流水（需登录）"""
+    from engines.auto_follow import get_or_create_auto_account
+    from models.models import PaperTransaction
+    from config import settings
+    limit = min(max(1, limit), 1000)   # 上界防止超大查询拉爆内存
+    acct = get_or_create_auto_account(db)
+    txns = (
+        db.query(PaperTransaction)
+        .filter(
+            PaperTransaction.account_id == acct.id,
+            PaperTransaction.note.like(f"%{settings.AUTO_FOLLOW_NOTE_TAG}%"),
+        )
+        .order_by(PaperTransaction.trade_time.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id":           t.id,
+            "side":         t.side,
+            "stock_code":   t.stock_code,
+            "shares":       t.shares,
+            "price":        float(t.price) if t.price is not None else None,
+            "amount":       float(t.amount) if t.amount is not None else None,
+            "realized_pnl": float(t.realized_pnl) if t.realized_pnl is not None else None,
+            "note":         t.note,
+            "trade_time":   str(t.trade_time) if t.trade_time else None,
+        }
+        for t in txns
+    ]
+
+
+@router.post("/paper/auto-follow/run")
+def auto_follow_trigger(
+    db: Session = Depends(get_db),
+    _admin = Depends(get_current_admin),   # 仅管理员可触发：写操作 + 重计算昂贵
+):
+    """手动触发一次自动跟单（凌晨 cron 之外的补救入口；仅管理员）"""
+    from engines.auto_follow import run_v202g_auto_follow
+    return run_v202g_auto_follow(db)
+
+
 # /paper/cache/warmup 节流：每 user 5 秒一次（防多 tab/window 同时连点暴打 sina）
 _WARMUP_THROTTLE_SEC = 5.0
 _warmup_last_at: dict[int, float] = {}
@@ -899,7 +968,7 @@ def refresh_all_data(background_tasks: BackgroundTasks):
     """一键触发：宏观数据 → 行业重新评分 → 长期信号 → 短期信号"""
     from database import SessionLocal as _SL
     from data.task_tracker import start_refresh, mark_task
-    TASKS = ["宏观数据", "行业评分", "长期信号刷新", "短期信号刷新"]
+    TASKS = ["宏观数据", "行业评分", "长期信号刷新", "短期信号刷新", "自动跟单"]
     start_refresh(TASKS)
 
     def _run():
@@ -942,6 +1011,20 @@ def refresh_all_data(background_tasks: BackgroundTasks):
                           f"成功 {r['generated']} / 跳过 {r['skipped']} / 共 {r['total']} / 耗时 {r['elapsed_sec']}s")
             except Exception as e:
                 mark_task("短期信号刷新", "error", str(e))
+
+            mark_task("自动跟单", "running")
+            try:
+                from engines.auto_follow import run_v202g_auto_follow
+                af = run_v202g_auto_follow(_db)
+                if af.get("skipped_reason") == "already_running":
+                    mark_task("自动跟单", "done", "已在运行，跳过本次")
+                else:
+                    mark_task(
+                        "自动跟单", "done",
+                        f"买 {af['bought_n']} / 卖 {af['sold_n']} / 跳过 {af['skipped_n']}",
+                    )
+            except Exception as e:
+                mark_task("自动跟单", "error", str(e))
         finally:
             _db.close()
 
@@ -1025,6 +1108,25 @@ def _get_industry_score_map(db: Session) -> dict:
     return {r.code: {"name": r.name, "total_score": r.total_score} for r in rows}
 
 
+def _apply_short_watch_filter(q):
+    from engines.short_signal_engine import MARKET_TREND_BLOCK_HINT
+    return q.filter(
+        Stock.short_signal == "HOLD",
+        Stock.short_composite_score >= settings.SHORT_BUY_THRESHOLD,
+        Stock.short_signal_reason.isnot(None),
+        Stock.short_signal_reason.contains(MARKET_TREND_BLOCK_HINT),
+    )
+
+
+def _short_observe_candidate(s: Stock) -> bool:
+    from engines.short_signal_engine import short_signal_blocked_by_market
+    return (
+        s.short_composite_score is not None
+        and s.short_composite_score >= settings.SHORT_BUY_THRESHOLD
+        and short_signal_blocked_by_market(s.short_signal, s.short_signal_reason)
+    )
+
+
 def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
     ind_info = (industry_map or {}).get(s.industry_code, {}) if s.industry_code else {}
     return {
@@ -1049,11 +1151,14 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_signal":           s.short_signal,
         "short_signal_reason":    s.short_signal_reason,
         "short_signal_updated":   str(s.short_signal_updated) if s.short_signal_updated else None,
-        "short_score_momentum":   s.short_score_momentum,
-        "short_score_volprice":   s.short_score_volprice,
-        "short_score_macro":      s.short_score_macro,
-        "short_score_tech":       s.short_score_tech,
-        "short_score_news_heat":  s.short_score_news_heat,
+        "short_score_momentum":           s.short_score_momentum,
+        "short_score_volprice":           s.short_score_volprice,
+        "short_score_macro":              s.short_score_macro,
+        "short_score_tech":               s.short_score_tech,
+        "short_score_news_heat":          s.short_score_news_heat,
+        "short_score_industry_relative":  s.short_score_industry_relative,
+        "short_score_pricing_power":      s.short_score_pricing_power,
+        "short_observe_candidate": _short_observe_candidate(s),
     }
 
 

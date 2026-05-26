@@ -14,7 +14,7 @@ sys.path.insert(0, ".")
 
 import json
 from database import SessionLocal
-from models.models import BacktestRecord
+from models.models import BacktestRecord, BacktestRun
 from scipy.stats import spearmanr
 import numpy as np
 
@@ -22,6 +22,13 @@ import numpy as np
 def diagnose(run_id: int):
     db = SessionLocal()
     try:
+        run = db.query(BacktestRun).filter_by(id=run_id).first()
+        if run and run.signal_type != "short":
+            print(
+                f"\n[WARN] Run {run_id} 的 signal_type={run.signal_type!r}，"
+                "不是短期回测；下面结果不能用于评估短期信号。"
+            )
+
         recs = db.query(BacktestRecord).filter_by(run_id=run_id).all()
         print(f"\n=== Run {run_id}: {len(recs)} 条记录 ===")
         if not recs:
@@ -40,7 +47,10 @@ def diagnose(run_id: int):
         print(f"\nComposite IC (全样本，n={len(all_x)}): {ic:.4f}")
 
         # 各子分 IC
-        dims = ["momentum", "volprice", "macro", "tech", "news_heat", "industry_relative"]
+        dims = [
+            "momentum", "volprice", "macro", "tech", "news_heat",
+            "industry_relative", "pricing_power", "market_trend",
+        ]
         print(f"\n各维度 IC（全样本）：")
         for dim in dims:
             xs, ys = [], []

@@ -7,7 +7,7 @@
     <el-aside width="220px" class="aside">
       <div class="logo">
         <el-icon size="22"><TrendCharts /></el-icon>
-        <span>长期价值筛选</span>
+        <span>好股雷达</span>
       </div>
       <el-menu
         :default-active="$route.path"
@@ -35,6 +35,10 @@
         <el-menu-item index="/backtest">
           <el-icon><Histogram /></el-icon>
           <span>回测中心</span>
+        </el-menu-item>
+        <el-menu-item index="/auto-follow">
+          <el-icon><Promotion /></el-icon>
+          <span>自动跟单</span>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>
@@ -366,6 +370,8 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 1;
 }
 
 .logo {
