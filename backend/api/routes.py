@@ -1016,10 +1016,13 @@ def refresh_all_data(background_tasks: BackgroundTasks):
             try:
                 from engines.auto_follow import run_v202g_auto_follow
                 af = run_v202g_auto_follow(_db)
-                mark_task(
-                    "自动跟单", "done",
-                    f"买 {af['bought_n']} / 卖 {af['sold_n']} / 跳过 {af['skipped_n']}",
-                )
+                if af.get("skipped_reason") == "already_running":
+                    mark_task("自动跟单", "done", "已在运行，跳过本次")
+                else:
+                    mark_task(
+                        "自动跟单", "done",
+                        f"买 {af['bought_n']} / 卖 {af['sold_n']} / 跳过 {af['skipped_n']}",
+                    )
             except Exception as e:
                 mark_task("自动跟单", "error", str(e))
         finally:
