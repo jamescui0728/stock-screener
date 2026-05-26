@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     # v202h 自动跟单（v202g 信号 → 模拟盘）
     AUTO_FOLLOW_ACCOUNT_NAME:    str   = "v202g 自动跟单"
     AUTO_FOLLOW_NOTE_TAG:        str   = "v202g-auto"
-    AUTO_FOLLOW_HOLD_DAYS:       int   = 15      # 与 BACKTEST_HOLD_DAYS_SHORT 对齐
+    AUTO_FOLLOW_HOLD_DAYS:       int   = 15      # 自然日；与回测 BACKTEST_HOLD_DAYS_SHORT 的自然日口径一致（见 issue #4）
     AUTO_FOLLOW_POSITION_YUAN:   float = 50_000  # 每只目标买入金额
     AUTO_FOLLOW_INITIAL_CASH:    float = 1_000_000
     AUTO_FOLLOW_MAX_OPEN_POSITIONS: int = 20    # 并发持仓上限（≈ 初始资金 / 单票金额）

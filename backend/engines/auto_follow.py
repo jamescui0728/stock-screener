@@ -150,6 +150,7 @@ def _run_v202g_auto_follow_locked(db: Session) -> dict:
 
     for pos in positions:
         opened = pos.opened_at.date() if pos.opened_at else today
+        # held 为自然日（非交易日），与回测 exit_date=entry+timedelta(days=N) 的口径一致（issue #4）
         held = (today - opened).days
         if held < settings.AUTO_FOLLOW_HOLD_DAYS:
             continue
