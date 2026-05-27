@@ -880,7 +880,9 @@ def generate_short_signal(
             _cached_stock=_cached_stock,
         )
     else:
-        news_heat = {"score": 50.0, "n_news": 0, "avg_sentiment": None}
+        # 与 score_news_heat 返回 schema 保持一致（含 spike/veto），避免下游 KeyError
+        news_heat = {"score": 50.0, "n_news": 0, "avg_sentiment": None,
+                     "spike": 0.0, "veto": False}
     ind_rel    = score_industry_relative(
         db, stock_code, as_of_date,
         _cached_stock=_cached_stock,
