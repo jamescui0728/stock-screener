@@ -1,6 +1,6 @@
 """短期信号风控逻辑的单元测试。"""
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -14,10 +14,12 @@ from engines.short_signal_engine import (
     MARKET_TREND_BLOCK_HINT,
     _apply_cross_sectional_ranks,
     classify_short_signal,
+    compute_industry_news_heat,
     score_market_trend,
+    score_news_heat,
     short_signal_blocked_by_market,
 )
-from models.models import PriceData, Stock
+from models.models import NewsItem, PriceData, Stock
 
 
 class TestClassifyShortSignal(unittest.TestCase):
@@ -362,6 +364,73 @@ class TestAutoFollowReadOnlyGet(unittest.TestCase):
             self.assertEqual(db.query(PaperAccount).count(), 0)
         finally:
             db.close()
+
+
+class TestNewsHeatScoring(unittest.TestCase):
+    """阶段1：4 类舆情特征（热度激增 / 情感方向 / 事件 veto / 板块联动）。"""
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+        self.db = self.Session()
+        self.asof = date(2026, 5, 20)
+
+    def tearDown(self):
+        self.db.close()
+
+    def _stock(self, code, ind="BK0475"):
+        self.db.add(Stock(code=code, name=code, is_active=True, industry_code=ind))
+        self.db.commit()
+
+    def _news(self, code, days_ago, sent, event=None, ind="BK0475"):
+        pub = datetime.combine(self.asof, datetime.min.time()) - timedelta(days=days_ago)
+        self.db.add(NewsItem(
+            stock_code=code, industry_code=ind, pub_date=pub,
+            title=f"{code} news", sentiment_score=sent, event_type=event,
+        ))
+        self.db.commit()
+
+    def test_no_news_returns_neutral(self):
+        self._stock("A1")
+        r = score_news_heat(self.db, "A1", self.asof)
+        self.assertEqual(r["score"], 50.0)
+        self.assertFalse(r["veto"])
+
+    def test_positive_spike_pushes_bullish(self):
+        """近7日多条正面新闻、前期无 → 激增 + 正情感 → 明显 > 50。"""
+        self._stock("A2")
+        for d in range(1, 6):
+            self._news("A2", d, 0.8, event="订单合作")
+        r = score_news_heat(self.db, "A2", self.asof)
+        self.assertGreater(r["score"], 65)
+        self.assertGreater(r["spike"], 1.0)
+
+    def test_veto_event_caps_score_low(self):
+        """退市风险 + 强负面情感 → 硬性压到 <= 15。"""
+        self._stock("A3")
+        self._news("A3", 1, -0.9, event="退市风险")
+        self._news("A3", 2, 0.5, event="订单合作")   # 即使有正面也被 veto
+        r = score_news_heat(self.db, "A3", self.asof)
+        self.assertLessEqual(r["score"], 15.0)
+        self.assertTrue(r["veto"])
+
+    def test_industry_news_heat_and_sector_boost(self):
+        """板块整体正面 → 个股获得 sector 加成。"""
+        # 同行业多只股票的正面新闻，撑起行业热度
+        for code in ("A4", "B1", "B2"):
+            self.db.add(Stock(code=code, name=code, is_active=True, industry_code="BK0475"))
+        self.db.commit()
+        for code in ("A4", "B1", "B2"):
+            for d in range(1, 12):
+                self._news(code, d, 0.7, event="产品技术")
+        ind_news = compute_industry_news_heat(self.db, self.asof)
+        self.assertIn("BK0475", ind_news)
+        self.assertGreater(ind_news["BK0475"]["score"], 50)
+        # 带板块缓存 vs 不带，分数应更高（或相等）
+        base = score_news_heat(self.db, "A4", self.asof)
+        boosted = score_news_heat(self.db, "A4", self.asof, _cached_industry_news=ind_news)
+        self.assertGreaterEqual(boosted["score"], base["score"])
 
 
 if __name__ == "__main__":
