@@ -513,15 +513,17 @@ def score_news_heat(db: Session, stock_code: str, as_of_date=None) -> dict:
 
     n = len(rows)
     sentiments = [r.sentiment_score for r in rows if r.sentiment_score is not None]
-    avg_sent = sum(sentiments) / len(sentiments) if sentiments else 0.5
+    # sentiment_score ∈ [-1, +1]，中性 = 0（见 data/sentiment.analyze_sentiment）
+    avg_sent = sum(sentiments) / len(sentiments) if sentiments else 0.0
 
     # 条数：越多越热（>=10 满热）
     heat_factor = min(1.0, n / 10)
 
-    # 评分 = 50 + (情感偏离中性) × 热度
-    # 情感 0.7（积极） + 热度 1.0 → 50 + 40 = 90
-    # 情感 0.3（消极） + 热度 1.0 → 50 - 40 = 10
-    score = 50 + (avg_sent - 0.5) * 80 * heat_factor
+    # 评分 = 50 + 情感 × 50 × 热度（情感区间 [-1,1]，中性 0 → 50）
+    # 情感 +0.8 + 热度 1.0 → 50 + 40 = 90
+    # 情感 -0.8 + 热度 1.0 → 50 - 40 = 10
+    # 中性 0 → 50（不再误判为看空，修复原 (avg_sent-0.5) 把 [-1,1] 当 [0,1] 的 bug）
+    score = 50 + avg_sent * 50 * heat_factor
 
     return {
         "score":         round(max(0, min(100, score)), 2),
