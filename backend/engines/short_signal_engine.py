@@ -833,6 +833,7 @@ def generate_short_signal(
     _cached_prices: Optional[dict] = None,
     _cached_stock_returns: Optional[dict] = None,
     _cached_market_trend: Optional[dict] = None,
+    _cached_industry_news: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -871,8 +872,13 @@ def generate_short_signal(
         _cached_stock=_cached_stock,
         _cached_industries=_cached_industries,
     )
-    if settings.SHORT_NEWS_HEAT_WEIGHT > 0:
-        news_heat = score_news_heat(db, stock_code, as_of_date)
+    # 观察模式：weight=0 时仍计算并写库（前向测试用），但 composite 里乘 0 不影响买卖
+    if settings.SHORT_NEWS_HEAT_WEIGHT > 0 or settings.SHORT_NEWS_OBSERVE:
+        news_heat = score_news_heat(
+            db, stock_code, as_of_date,
+            _cached_industry_news=_cached_industry_news,
+            _cached_stock=_cached_stock,
+        )
     else:
         news_heat = {"score": 50.0, "n_news": 0, "avg_sentiment": None}
     ind_rel    = score_industry_relative(
@@ -1231,6 +1237,12 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
         compute_industry_avg_gm(db)
         if settings.SHORT_PRICING_POWER_WEIGHT > 0 else None
     )
+    # 舆情：观察模式或有权重时，预算行业舆情热度（板块联动用，一次批量查询）
+    industry_news     = (
+        compute_industry_news_heat(db)
+        if (settings.SHORT_NEWS_HEAT_WEIGHT > 0 or settings.SHORT_NEWS_OBSERVE)
+        else None
+    )
     logger.info(
         f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个，"
         f"price_cache={len(price_cache)} 只，industry_returns={len(industry_returns)} 个，"
@@ -1261,6 +1273,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
                 _cached_prices=price_cache,
                 _cached_stock_returns=stock_returns,
                 _cached_market_trend=market_trend,
+                _cached_industry_news=industry_news,
             )
             if r:
                 raw_results[stock.code] = r
