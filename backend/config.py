@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     SHORT_PRICING_POWER_WEIGHT:      float = 0.00   # 保留 0 权重作为未来重设计 hook
     # 总和必须 = 1.0
 
+    # 舆情观察模式：weight=0 时仍计算 news_heat 并写库展示/前向测试，但不参与买卖决策。
+    # 前向测试（forward_test_check.py）证明 news_heat 与未来收益正相关后，
+    # 再从权重池给 SHORT_NEWS_HEAT_WEIGHT 匀出实权重。
+    SHORT_NEWS_OBSERVE: bool = True
+
     # v202g 阈值（目标 BUY 胜率 ≥ 85%）：
     # 拿掉 pricing_power 后 composite 分布右移 ~1 分，原 71/73 阈值精度被稀释，
     # run 66 精度分析重新校准：

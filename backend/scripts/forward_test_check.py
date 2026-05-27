@@ -108,6 +108,63 @@ def main(snapshot_path: str):
     db.close()
 
 
+def create_snapshot(db, hold_days: int = 15, out_dir: str = "/data") -> str:
+    """
+    记录当前舆情观察快照：所有有舆情信号(news_heat≠50)的 active 股票，
+    按 news_heat 三分位分 A_neg / mid / B_pos，记录入场价。
+    hold_days 天后用 main() 回查各组前向超额收益，判断 news_heat 该正/负/零权。
+    """
+    from models.models import Stock
+    today = date.today()
+    bench_code = "IDX_000300"
+    bench_price, _ = _latest_price(db, bench_code, today)
+
+    stocks = (
+        db.query(Stock)
+        .filter(Stock.is_active == True, Stock.short_score_news_heat.isnot(None))
+        .all()
+    )
+    pool = []
+    for s in stocks:
+        nh = s.short_score_news_heat
+        if nh is None or nh == 50.0:        # 无有效舆情信号
+            continue
+        px, _ = _latest_price(db, s.code, today)
+        if px is None:
+            continue
+        pool.append({"code": s.code, "name": s.name or s.code,
+                     "entry_price": px, "news_heat": nh})
+
+    if pool:
+        vals = sorted(p["news_heat"] for p in pool)
+        n = len(vals)
+        lo, hi = vals[n // 3], vals[(2 * n) // 3]
+        for p in pool:
+            p["group"] = ("A_neg" if p["news_heat"] <= lo
+                          else "B_pos" if p["news_heat"] >= hi else "mid")
+
+    snap = {
+        "snapshot_date": str(today), "hold_days": hold_days,
+        "bench_code": bench_code, "bench_price": bench_price,
+        "positions": pool,
+    }
+    path = f"{out_dir}/forward_test_news_heat_{today}.json"
+    with open(path, "w") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=1)
+    print(f"snapshot 写入 {path}：{len(pool)} 只候选（A_neg/mid/B_pos 三分位）")
+    return path
+
+
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "/data/forward_test_news_heat_2026-05-18.json"
-    main(path)
+    # 用法：
+    #   python scripts/forward_test_check.py snapshot        # 记录今日快照
+    #   python scripts/forward_test_check.py <snapshot.json> # N 天后回查
+    if len(sys.argv) > 1 and sys.argv[1] == "snapshot":
+        db = SessionLocal()
+        try:
+            create_snapshot(db)
+        finally:
+            db.close()
+    else:
+        path = sys.argv[1] if len(sys.argv) > 1 else "/data/forward_test_news_heat_2026-05-18.json"
+        main(path)

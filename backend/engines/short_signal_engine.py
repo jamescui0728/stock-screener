@@ -488,45 +488,142 @@ def score_industry_relative(
 
 
 # ════════════════════════════════════════════════════════════════
-# 5. 新闻热度评分（0-100）
+# 5. 新闻热度评分（0-100）— 4 类舆情特征
+#    1) 热度激增：近 7 日新闻数 vs 前 30 日日均基线
+#    2) 情感方向：时间衰减 + 事件加权的平均情感
+#    3) 事件类型：正面事件放大、强负面监管/退市事件 veto
+#    4) 板块联动：所属行业整体舆情热度的加成
 # ════════════════════════════════════════════════════════════════
-def score_news_heat(db: Session, stock_code: str, as_of_date=None) -> dict:
+# 正面事件：放大情感影响（并购/大订单/获批等是短线催化）
+NEWS_POSITIVE_EVENTS = {"并购重组", "订单合作", "产品技术", "政策"}
+# 强负面事件类型：配合强负情感 → 硬性压低（接刀风险）
+NEWS_VETO_EVENTS     = {"退市风险", "监管"}
+NEWS_VETO_SENT       = -0.7   # veto 事件情感 <= 此值才触发
+
+
+def _clip(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def compute_industry_news_heat(db: Session, as_of_date=None, lookback_days: int = 7) -> dict:
     """
-    近 7 天新闻：条数 × 平均情感
-    无新闻 → 中性 50（避免静默股票被一刀切）
+    批量算每个行业近 N 日舆情热度（板块联动用，可缓存后传给 score_news_heat）。
+    返回 {industry_code: {"avg_sent": float, "n_news": int, "score": 0-100}}
     """
-    cutoff   = as_of_date or datetime.utcnow().date()
-    since    = datetime.combine(cutoff, datetime.min.time()) - timedelta(days=7)
+    cutoff = as_of_date or datetime.utcnow().date()
+    since  = datetime.combine(cutoff, datetime.min.time()) - timedelta(days=lookback_days)
+    end    = datetime.combine(cutoff, datetime.max.time())
+
+    stock_ind = dict(
+        db.query(Stock.code, Stock.industry_code)
+        .filter(Stock.is_active == True, Stock.industry_code.isnot(None)).all()
+    )
+    rows = (
+        db.query(NewsItem.stock_code, NewsItem.sentiment_score)
+        .filter(
+            NewsItem.pub_date >= since, NewsItem.pub_date <= end,
+            NewsItem.stock_code.isnot(None),
+        ).all()
+    )
+    buckets = defaultdict(list)
+    for code, sent in rows:
+        ind = stock_ind.get(code)
+        if ind:
+            buckets[ind].append(sent if sent is not None else 0.0)
+
+    result = {}
+    for ind, sents in buckets.items():
+        n = len(sents)
+        avg = sum(sents) / n if n else 0.0
+        heat = min(1.0, n / 30.0)   # 行业级 >=30 条算满热
+        result[ind] = {
+            "avg_sent": round(avg, 3),
+            "n_news":   n,
+            "score":    round(_clip(50 + avg * 50 * heat, 0, 100), 2),
+        }
+    return result
+
+
+def score_news_heat(
+    db: Session, stock_code: str, as_of_date=None,
+    _cached_industry_news: Optional[dict] = None,
+    _cached_stock: Optional[Stock] = None,
+) -> dict:
+    """
+    舆情综合分（0-100），中性 50。无新闻 → 50（不一刀切静默股票）。
+    融合：热度激增 × 事件加权情感 + 板块联动加成 + 强负面事件 veto。
+    """
+    cutoff       = as_of_date or datetime.utcnow().date()
+    recent_since = datetime.combine(cutoff, datetime.min.time()) - timedelta(days=7)
+    end          = datetime.combine(cutoff, datetime.max.time())
 
     rows = (
         db.query(NewsItem)
         .filter(
             NewsItem.stock_code == stock_code,
-            NewsItem.pub_date >= since,
-            NewsItem.pub_date <= datetime.combine(cutoff, datetime.max.time()),
+            NewsItem.pub_date >= recent_since,
+            NewsItem.pub_date <= end,
         )
+        .order_by(NewsItem.pub_date.desc())
         .all()
     )
 
     if not rows:
-        return {"score": 50.0, "n_news": 0, "avg_sentiment": None}
+        return {"score": 50.0, "n_news": 0, "avg_sentiment": None,
+                "spike": 0.0, "veto": False}
 
     n = len(rows)
-    sentiments = [r.sentiment_score for r in rows if r.sentiment_score is not None]
-    avg_sent = sum(sentiments) / len(sentiments) if sentiments else 0.5
 
-    # 条数：越多越热（>=10 满热）
-    heat_factor = min(1.0, n / 10)
+    # ── 1) 热度激增：近 7 日日均 vs 前 30 日（cutoff-37..-7）日均 ──
+    base_since = datetime.combine(cutoff, datetime.min.time()) - timedelta(days=37)
+    base_count = (
+        db.query(NewsItem)
+        .filter(
+            NewsItem.stock_code == stock_code,
+            NewsItem.pub_date >= base_since,
+            NewsItem.pub_date < recent_since,
+        ).count()
+    )
+    base_daily   = max(base_count / 30.0, 0.05)   # 防 0；基线极低时一点新闻就算激增
+    recent_daily = n / 7.0
+    spike        = recent_daily / base_daily
+    spike_mult   = _clip(spike / 2.0, 0.8, 1.5)   # 激增放大情感影响，封顶 1.5×
 
-    # 评分 = 50 + (情感偏离中性) × 热度
-    # 情感 0.7（积极） + 热度 1.0 → 50 + 40 = 90
-    # 情感 0.3（消极） + 热度 1.0 → 50 - 40 = 10
-    score = 50 + (avg_sent - 0.5) * 80 * heat_factor
+    # ── 2) 情感方向：时间衰减 + 事件加权；同时探测 3) veto ──
+    weighted_sum = 0.0
+    total_weight = 0.0
+    has_veto     = False
+    for i, r in enumerate(rows):          # rows 已按时间倒序，i=0 最新
+        s     = r.sentiment_score if r.sentiment_score is not None else 0.0
+        decay = 0.9 ** i
+        ev_mult = 1.3 if r.event_type in NEWS_POSITIVE_EVENTS else 1.0
+        weighted_sum += s * decay * ev_mult
+        total_weight += decay * ev_mult
+        if r.event_type in NEWS_VETO_EVENTS and s <= NEWS_VETO_SENT:
+            has_veto = True
+    eff_sent = _clip(weighted_sum / total_weight if total_weight else 0.0, -1.0, 1.0)
+
+    heat_factor = min(1.0, n / 8.0)
+    score = 50 + eff_sent * 50 * heat_factor * spike_mult
+
+    # ── 4) 板块联动：所属行业整体舆情偏离中性 → 个股小幅加成（±10）──
+    if _cached_industry_news:
+        stock = _cached_stock or db.query(Stock).filter_by(code=stock_code).first()
+        if stock and stock.industry_code:
+            ind = _cached_industry_news.get(stock.industry_code)
+            if ind:
+                score += _clip((ind["score"] - 50) * 0.2, -10, 10)
+
+    # ── 3) veto：强负面监管/退市事件 → 硬性压低 ──
+    if has_veto:
+        score = min(score, 15.0)
 
     return {
-        "score":         round(max(0, min(100, score)), 2),
+        "score":         round(_clip(score, 0, 100), 2),
         "n_news":        n,
-        "avg_sentiment": round(avg_sent, 3),
+        "avg_sentiment": round(eff_sent, 3),
+        "spike":         round(spike, 2),
+        "veto":          has_veto,
     }
 
 
@@ -736,6 +833,7 @@ def generate_short_signal(
     _cached_prices: Optional[dict] = None,
     _cached_stock_returns: Optional[dict] = None,
     _cached_market_trend: Optional[dict] = None,
+    _cached_industry_news: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -774,10 +872,17 @@ def generate_short_signal(
         _cached_stock=_cached_stock,
         _cached_industries=_cached_industries,
     )
-    if settings.SHORT_NEWS_HEAT_WEIGHT > 0:
-        news_heat = score_news_heat(db, stock_code, as_of_date)
+    # 观察模式：weight=0 时仍计算并写库（前向测试用），但 composite 里乘 0 不影响买卖
+    if settings.SHORT_NEWS_HEAT_WEIGHT > 0 or settings.SHORT_NEWS_OBSERVE:
+        news_heat = score_news_heat(
+            db, stock_code, as_of_date,
+            _cached_industry_news=_cached_industry_news,
+            _cached_stock=_cached_stock,
+        )
     else:
-        news_heat = {"score": 50.0, "n_news": 0, "avg_sentiment": None}
+        # 与 score_news_heat 返回 schema 保持一致（含 spike/veto），避免下游 KeyError
+        news_heat = {"score": 50.0, "n_news": 0, "avg_sentiment": None,
+                     "spike": 0.0, "veto": False}
     ind_rel    = score_industry_relative(
         db, stock_code, as_of_date,
         _cached_stock=_cached_stock,
@@ -1134,6 +1239,12 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
         compute_industry_avg_gm(db)
         if settings.SHORT_PRICING_POWER_WEIGHT > 0 else None
     )
+    # 舆情：观察模式或有权重时，预算行业舆情热度（板块联动用，一次批量查询）
+    industry_news     = (
+        compute_industry_news_heat(db)
+        if (settings.SHORT_NEWS_HEAT_WEIGHT > 0 or settings.SHORT_NEWS_OBSERVE)
+        else None
+    )
     logger.info(
         f"短期信号预加载：macro={macro_100:.1f}，industries={len(industries_map)} 个，"
         f"price_cache={len(price_cache)} 只，industry_returns={len(industry_returns)} 个，"
@@ -1164,6 +1275,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
                 _cached_prices=price_cache,
                 _cached_stock_returns=stock_returns,
                 _cached_market_trend=market_trend,
+                _cached_industry_news=industry_news,
             )
             if r:
                 raw_results[stock.code] = r
