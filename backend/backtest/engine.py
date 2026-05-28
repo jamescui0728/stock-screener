@@ -374,6 +374,7 @@ def _run_short_check_date(db, run_id, check_date, hold_days, stocks, params, rec
                 _cached_prices=price_cache,
                 _cached_stock_returns=stock_returns,
                 _cached_market_trend=market_trend,
+                _skip_news_observe=True,   # 回测跳过观察模式 news 计算（weight=0 时纯废功）
             )
             if r:
                 raw_short[stock.code] = r
