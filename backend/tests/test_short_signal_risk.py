@@ -570,5 +570,56 @@ class TestScoreTurnover(unittest.TestCase):
             db.close()
 
 
+class TestWriteBackPersistsTurnover(unittest.TestCase):
+    """回归 Bugbot #11: 所有写库路径都必须落 short_score_turnover（防漏写库）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(cls.engine)
+        cls.Session = sessionmaker(bind=cls.engine)
+
+    def _seed_prices_with_turnover(self, db, code, days=30):
+        base = date(2024, 1, 1)
+        for i in range(days):
+            db.add(PriceData(stock_code=code, trade_date=base + timedelta(days=i),
+                             open=10 + i * 0.1, close=10 + i * 0.1, volume=1_000_000,
+                             turnover_rate=8.0))   # sweet 区
+        db.commit()
+
+    def test_single_stock_write_back_includes_turnover(self):
+        from engines.short_signal_engine import generate_short_signal
+
+        db = self.Session()
+        try:
+            db.add(Stock(code="TW01", name="测试", is_active=True, industry_code="BK0001"))
+            self._seed_prices_with_turnover(db, "TW01")
+            generate_short_signal(
+                db, "TW01", as_of_date=date(2024, 1, 30),
+                write_back=True, commit=True,
+                _cached_macro_100=50.0, _cached_market_trend={"pass": True},
+                _cached_industry_returns={}, _cached_industries={},
+            )
+            stock = db.query(Stock).filter_by(code="TW01").first()
+            # 关键：写库后 short_score_turnover 必须 != None
+            self.assertIsNotNone(stock.short_score_turnover, "single-stock 写库路径漏写 turnover")
+        finally:
+            db.close()
+
+    def test_batch_writeback_loop_covers_all_sub_scores(self):
+        """守护 generate_all_short_signals 的 Phase 3 写库循环：
+        sub_scores 出现的每个键（除 market_trend 不入库），Stock 都得有对应列且循环中要写。
+        """
+        import inspect
+        from engines.short_signal_engine import generate_all_short_signals
+        src = inspect.getsource(generate_all_short_signals)
+        # 必须显式赋值这些列，否则 batch 路径会静默漏写（Bugbot #11 案例）
+        for col in ("short_score_momentum", "short_score_volprice", "short_score_macro",
+                    "short_score_tech", "short_score_news_heat",
+                    "short_score_industry_relative", "short_score_pricing_power",
+                    "short_score_turnover"):
+            self.assertIn(col, src, f"batch 写库循环未覆盖 {col}")
+
+
 if __name__ == "__main__":
     unittest.main()

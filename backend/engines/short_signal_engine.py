@@ -1398,6 +1398,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
         stock.short_score_news_heat          = sub.get("news_heat")
         stock.short_score_industry_relative  = sub.get("industry_relative")
         stock.short_score_pricing_power      = sub.get("pricing_power")
+        stock.short_score_turnover           = sub.get("turnover")
         results[code] = r["short_signal"]
     db.commit()
 
