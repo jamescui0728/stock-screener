@@ -489,5 +489,86 @@ class TestNewsObserveDoesNotAffectComposite(unittest.TestCase):
             db.close()
 
 
+class TestScoreTurnover(unittest.TestCase):
+    """换手率打分（观察模式独立维度）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(cls.engine)
+        cls.Session = sessionmaker(bind=cls.engine)
+        cls.asof = date(2024, 6, 1)
+
+    def _seed(self, db, code, tovers_60_then_5):
+        """tovers_60_then_5: list[float]，前 60 天 + 后 5 天换手率（共 65 行）"""
+        for i, t in enumerate(tovers_60_then_5):
+            db.add(PriceData(stock_code=code, trade_date=self.asof - timedelta(days=len(tovers_60_then_5) - 1 - i),
+                             open=10, close=10, volume=1_000_000, turnover_rate=t))
+        db.commit()
+
+    def test_insufficient_data_returns_neutral(self):
+        from engines.short_signal_engine import score_turnover
+        db = self.Session()
+        try:
+            db.add(Stock(code="T01", name="x", is_active=True))
+            self._seed(db, "T01", [5.0] * 10)   # <20 → 中性
+            r = score_turnover(db, "T01", self.asof)
+            self.assertEqual(r["score"], 50.0)
+            self.assertEqual(r["level_signal"], "insufficient")
+        finally:
+            db.close()
+
+    def test_sweet_spot_no_spike_returns_50(self):
+        """5%~15% 区间、无激增 → 基底 50。"""
+        from engines.short_signal_engine import score_turnover
+        db = self.Session()
+        try:
+            db.add(Stock(code="T02", name="x", is_active=True))
+            self._seed(db, "T02", [8.0] * 65)
+            r = score_turnover(db, "T02", self.asof)
+            self.assertEqual(r["level_signal"], "sweet")
+            self.assertAlmostEqual(r["score"], 50.0, delta=0.5)
+        finally:
+            db.close()
+
+    def test_spike_bullish_bonus(self):
+        """近 5 日换手率显著放大 → spike_bonus 加分。"""
+        from engines.short_signal_engine import score_turnover
+        db = self.Session()
+        try:
+            db.add(Stock(code="T03", name="x", is_active=True))
+            self._seed(db, "T03", [3.0] * 60 + [12.0] * 5)   # 基线 3%、最近 12%（仍在 sweet/active 边界）
+            r = score_turnover(db, "T03", self.asof)
+            self.assertGreater(r["spike_ratio"], 2.0)
+            self.assertGreater(r["score"], 55.0)
+        finally:
+            db.close()
+
+    def test_overheat_penalizes(self):
+        """换手率持续 >25% → overheat 扣 15。"""
+        from engines.short_signal_engine import score_turnover
+        db = self.Session()
+        try:
+            db.add(Stock(code="T04", name="x", is_active=True))
+            self._seed(db, "T04", [30.0] * 65)
+            r = score_turnover(db, "T04", self.asof)
+            self.assertEqual(r["level_signal"], "overheat")
+            self.assertLessEqual(r["score"], 50.0)
+        finally:
+            db.close()
+
+    def test_illiquid_penalizes(self):
+        from engines.short_signal_engine import score_turnover
+        db = self.Session()
+        try:
+            db.add(Stock(code="T05", name="x", is_active=True))
+            self._seed(db, "T05", [0.2] * 65)
+            r = score_turnover(db, "T05", self.asof)
+            self.assertEqual(r["level_signal"], "illiquid")
+            self.assertLessEqual(r["score"], 50.0)
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

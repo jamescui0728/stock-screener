@@ -37,7 +37,10 @@ def _daily_data_update():
       4. 新闻情感分析
       5. 长期信号 + 短期信号
     """
-    from data.fetcher import fetch_macro_data, fetch_all_financial_data, fetch_all_price_data
+    from data.fetcher import (
+        fetch_macro_data, fetch_all_financial_data, fetch_all_price_data,
+        fetch_turnover_today,
+    )
     from data.sentiment import analyze_all_news
     from engines.signal_engine import generate_all_signals
     from engines.short_signal_engine import generate_all_short_signals
@@ -60,6 +63,13 @@ def _daily_data_update():
             logger.info("定时任务：沪深300 基准已增量")
         except Exception as e:
             logger.error(f"定时任务：基准增量失败: {e}")
+
+        # 1c. 今日换手率（观察模式 — sina 不返回，单次东财快照补齐）
+        try:
+            r = fetch_turnover_today(db)
+            logger.info(f"定时任务：今日换手率 {r}")
+        except Exception as e:
+            logger.error(f"定时任务：换手率快照失败: {e}")
 
         fetch_macro_data(db)
         fetch_all_financial_data(db, limit=200)

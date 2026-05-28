@@ -38,13 +38,15 @@ BENCHMARK_CODE = "IDX_000300"   # 沪深300，存放在 price_data 中
 
 def compute_recent_price_cache(db: Session, as_of_date=None, lookback_days: int = 180) -> dict:
     """
-    批量预加载最近价格窗口，供短期信号的 momentum / volprice / relative 复用。
-    返回 {stock_code: [(trade_date, close, volume), ...]}，每只股票按日期升序。
+    批量预加载最近价格窗口，供短期信号的 momentum / volprice / relative / turnover 复用。
+    返回 {stock_code: [(trade_date, close, volume, turnover_rate), ...]}，每只股票按日期升序。
+    元组 4 元素扩展兼容历史消费者（旧代码只读 [1] close / [2] volume）。
     """
     cutoff = as_of_date or datetime.utcnow().date()
     start = cutoff - timedelta(days=lookback_days)
     rows = (
-        db.query(PriceData.stock_code, PriceData.trade_date, PriceData.close, PriceData.volume)
+        db.query(PriceData.stock_code, PriceData.trade_date, PriceData.close,
+                 PriceData.volume, PriceData.turnover_rate)
         .filter(
             PriceData.trade_date >= start,
             PriceData.trade_date <= cutoff,
@@ -54,9 +56,9 @@ def compute_recent_price_cache(db: Session, as_of_date=None, lookback_days: int 
         .all()
     )
     cache = defaultdict(list)
-    for code, dt, close, volume in rows:
+    for code, dt, close, volume, turnover in rows:
         if close is not None:
-            cache[code].append((dt, close, volume))
+            cache[code].append((dt, close, volume, turnover))
     return dict(cache)
 
 
@@ -628,6 +630,79 @@ def score_news_heat(
 
 
 # ════════════════════════════════════════════════════════════════
+# 5.5 换手率评分（0-100）— 观察模式独立维度
+#     不重复 volprice 的"量价交互"，独立看：
+#       1) 激增（5日均 / 60日均）— 主力进场嫌疑
+#       2) 极值水平 — >25% 过热（顶部）/ <0.5% 流动性差
+# ════════════════════════════════════════════════════════════════
+TURNOVER_SWEET_LO = 5.0     # %
+TURNOVER_SWEET_HI = 15.0    # % — 5~15 区间视为健康活跃，无加减
+TURNOVER_HOT      = 25.0    # % — 超过算过热
+TURNOVER_ILLIQUID = 0.5     # % — 低于算流动性差
+
+
+def score_turnover(
+    db: Session, stock_code: str, as_of_date=None,
+    _cached_prices: Optional[dict] = None,
+) -> dict:
+    """
+    换手率综合分（0-100），中性 50；数据不足 → 50。
+    返回 dict 含 score / turnover_5d / turnover_60d / spike_ratio / level_signal。
+    """
+    if _cached_prices is not None:
+        points = (_cached_prices.get(stock_code) or [])[-80:]
+        tovers = [p[3] for p in points if len(p) > 3 and p[3] is not None]
+    else:
+        cutoff = as_of_date or datetime.utcnow().date()
+        start  = cutoff - timedelta(days=110)
+        rows = (
+            db.query(PriceData.trade_date, PriceData.turnover_rate)
+            .filter(PriceData.stock_code == stock_code,
+                    PriceData.trade_date <= cutoff,
+                    PriceData.trade_date >= start,
+                    PriceData.turnover_rate.isnot(None))
+            .order_by(PriceData.trade_date.asc())
+            .all()
+        )
+        tovers = [r[1] for r in rows]
+
+    if len(tovers) < 20:
+        return {"score": 50.0, "turnover_5d": None, "turnover_60d": None,
+                "spike_ratio": None, "level_signal": "insufficient"}
+
+    t5  = sum(tovers[-5:])  / 5
+    t60 = sum(tovers[-60:]) / min(60, len(tovers))
+    spike = (t5 / t60) if t60 > 0 else 1.0
+
+    # 激增组件：ratio ≤ 1.0 → 0；1.0~2.5 线性 0~+15；>=2.5 封顶 +15
+    if spike <= 1.0:
+        spike_bonus = 0.0
+    else:
+        spike_bonus = min(15.0, (spike - 1.0) / 1.5 * 15.0)
+
+    # 极值水平：基于近 5 日换手率均值
+    if t5 > TURNOVER_HOT:
+        level_adj, level_signal = -15.0, "overheat"
+    elif t5 > TURNOVER_SWEET_HI:
+        level_adj, level_signal = -5.0,  "active"
+    elif t5 >= TURNOVER_SWEET_LO:
+        level_adj, level_signal = 0.0,   "sweet"
+    elif t5 > TURNOVER_ILLIQUID:
+        level_adj, level_signal = -3.0,  "quiet"
+    else:
+        level_adj, level_signal = -15.0, "illiquid"
+
+    score = max(0.0, min(100.0, 50.0 + spike_bonus + level_adj))
+    return {
+        "score":         round(score, 2),
+        "turnover_5d":   round(t5, 3),
+        "turnover_60d":  round(t60, 3),
+        "spike_ratio":   round(spike, 2),
+        "level_signal":  level_signal,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
 # 6. 定价权评分（0-100）— 财报维度
 # ════════════════════════════════════════════════════════════════
 def _gm_publishable_cutoff(as_of_date) -> date:
@@ -835,6 +910,7 @@ def generate_short_signal(
     _cached_market_trend: Optional[dict] = None,
     _cached_industry_news: Optional[dict] = None,
     _skip_news_observe: bool = False,
+    _skip_turnover_observe: bool = False,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -892,6 +968,12 @@ def generate_short_signal(
         _cached_industry_returns=_cached_industry_returns,
         _cached_stock_returns=_cached_stock_returns,
     )
+    # 换手率（观察模式：与 news_heat 同结构 — 默认线上算，回测显式跳过）
+    if settings.SHORT_TURNOVER_WEIGHT > 0 or (settings.SHORT_TURNOVER_OBSERVE and not _skip_turnover_observe):
+        turnover = score_turnover(db, stock_code, as_of_date, _cached_prices=_cached_prices)
+    else:
+        turnover = {"score": 50.0, "turnover_5d": None, "turnover_60d": None,
+                    "spike_ratio": None, "level_signal": "skipped"}
     # 权重为 0 时跳过整段（v202g：拿掉 pricing_power 但保留 hook，
     # 同时省掉 per-stock 的 FinancialData 查询，回测从 ~80min 回到 ~13min）
     if settings.SHORT_PRICING_POWER_WEIGHT > 0:
@@ -912,7 +994,8 @@ def generate_short_signal(
         tech["score"]      * settings.SHORT_TECH_WEIGHT              +
         news_heat["score"] * settings.SHORT_NEWS_HEAT_WEIGHT         +
         ind_rel["score"]   * settings.SHORT_INDUSTRY_RELATIVE_WEIGHT +
-        pp["score"]        * settings.SHORT_PRICING_POWER_WEIGHT
+        pp["score"]        * settings.SHORT_PRICING_POWER_WEIGHT     +
+        turnover["score"]  * settings.SHORT_TURNOVER_WEIGHT
     )
     composite = round(max(0, min(100, composite)), 2)
 
@@ -933,6 +1016,7 @@ def generate_short_signal(
             "news_heat":         news_heat["score"],
             "industry_relative": ind_rel["score"],
             "pricing_power":     pp["score"],
+            "turnover":          turnover["score"],
             "market_trend":      100.0 if market["pass"] else 0.0,
         },
         "details": {
@@ -942,6 +1026,7 @@ def generate_short_signal(
             "news_heat":         news_heat,
             "industry_relative": ind_rel,
             "pricing_power":     pp,
+            "turnover":          turnover,
             "market_trend":      market,
         },
     }
@@ -961,6 +1046,7 @@ def generate_short_signal(
             stock.short_score_news_heat          = news_heat["score"]
             stock.short_score_industry_relative  = ind_rel["score"]
             stock.short_score_pricing_power      = pp["score"]
+            stock.short_score_turnover           = turnover["score"]
             if commit:
                 db.commit()
 

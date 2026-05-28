@@ -1160,6 +1160,7 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_score_news_heat":          s.short_score_news_heat,
         "short_score_industry_relative":  s.short_score_industry_relative,
         "short_score_pricing_power":      s.short_score_pricing_power,
+        "short_score_turnover":           s.short_score_turnover,
         "short_observe_candidate": _short_observe_candidate(s),
     }
 

@@ -99,6 +99,7 @@ class Stock(Base):
     short_score_news_heat = Column(Float, nullable=True)
     short_score_industry_relative = Column(Float, nullable=True)   # v202 第 6 维
     short_score_pricing_power     = Column(Float, nullable=True)   # v202f 第 7 维
+    short_score_turnover          = Column(Float, nullable=True)   # 换手率（观察模式，weight=0）
 
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -170,6 +171,7 @@ class PriceData(Base):
     pe_ttm     = Column(Float, nullable=True)
     pb         = Column(Float, nullable=True)
     market_cap = Column(Float, nullable=True)
+    turnover_rate = Column(Float, nullable=True)   # 当日换手率（%）— akshare stock_zh_a_hist/spot_em
 
     stock = relationship("Stock", back_populates="prices")
 

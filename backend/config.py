@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     # 再从权重池给 SHORT_NEWS_HEAT_WEIGHT 匀出实权重。
     SHORT_NEWS_OBSERVE: bool = True
 
+    # 换手率观察模式（独立维度，与 volprice 的 vol_ratio 互补）：
+    # weight=0 时仍计算 short_score_turnover 写库，前向测试转正后再给实权重。
+    SHORT_TURNOVER_WEIGHT: float = 0.00
+    SHORT_TURNOVER_OBSERVE: bool = True
+
     # v202g 阈值（目标 BUY 胜率 ≥ 85%）：
     # 拿掉 pricing_power 后 composite 分布右移 ~1 分，原 71/73 阈值精度被稀释，
     # run 66 精度分析重新校准：

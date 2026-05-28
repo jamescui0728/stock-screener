@@ -461,6 +461,99 @@ def fetch_all_price_data(db: Session, limit: int = 0, mode: str = "incremental")
 
 
 # ──────────────────────────────────────────────
+# 换手率（观察模式补充字段；sina 不返回，单独从东财补）
+# ──────────────────────────────────────────────
+def fetch_turnover_today(db: Session, target_date: Optional[date] = None) -> dict:
+    """
+    单次 stock_zh_a_spot_em 拿全市场 EOD 快照，UPDATE PriceData(target_date) 的
+    turnover_rate 字段。非交易日返回 {updated:0, ...} 不报错。
+
+    返回 {"updated": N, "skipped": N}（updated=成功 UPDATE 的行数）。
+    """
+    target_date = target_date or date.today()
+    try:
+        df = _retry(ak.stock_zh_a_spot_em, _timeout=60)
+    except Exception as e:
+        logger.warning(f"换手率快照拉取失败: {e}")
+        return {"updated": 0, "skipped": 0, "error": str(e)}
+    if df is None or df.empty:
+        return {"updated": 0, "skipped": 0}
+
+    # spot_em 的 code 通常无前缀；项目里 Stock.code 也是裸 6 位
+    turnover_map = {}
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip()
+        tr   = row.get("换手率")
+        if code and tr is not None and pd.notna(tr):
+            turnover_map[code] = float(tr)
+
+    updated = 0
+    rows = (
+        db.query(PriceData)
+        .filter(PriceData.trade_date == target_date,
+                PriceData.stock_code.in_(turnover_map.keys()))
+        .all()
+    )
+    for r in rows:
+        r.turnover_rate = turnover_map[r.stock_code]
+        updated += 1
+    db.commit()
+    logger.info(f"换手率快照({target_date})：更新 {updated} 行（覆盖率 {updated}/{len(turnover_map)}）")
+    return {"updated": updated, "skipped": len(turnover_map) - updated}
+
+
+def fetch_turnover_history(db: Session, stock_code: str, days: int = 365) -> int:
+    """
+    用 stock_zh_a_hist 单股拉历史换手率，UPDATE 已有 PriceData 行（不新增 OHLCV 行）。
+    返回成功 UPDATE 的行数。失败返回 0，不抛异常。
+    """
+    end = date.today()
+    start = end - timedelta(days=days)
+    try:
+        df = _retry(
+            ak.stock_zh_a_hist,
+            symbol=stock_code, period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="hfq",
+        )
+    except Exception as e:
+        logger.debug(f"换手率历史 {stock_code}: {e}")
+        return 0
+    if df is None or df.empty or "换手率" not in df.columns:
+        return 0
+
+    # 一次拉出该股该范围的 PriceData，按日期建索引
+    existing = {
+        r.trade_date: r for r in
+        db.query(PriceData)
+        .filter(PriceData.stock_code == stock_code,
+                PriceData.trade_date >= start,
+                PriceData.trade_date <= end)
+        .all()
+    }
+    updated = 0
+    for _, row in df.iterrows():
+        d = row.get("日期")
+        if hasattr(d, "date"):       # datetime → date
+            d = d.date()
+        elif isinstance(d, str):
+            d = _parse_date(d)
+        if not d:
+            continue
+        tr = row.get("换手率")
+        if tr is None or pd.isna(tr):
+            continue
+        pd_row = existing.get(d)
+        if pd_row is not None and pd_row.turnover_rate is None:
+            pd_row.turnover_rate = float(tr)
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+# ──────────────────────────────────────────────
 # 宏观数据
 # ──────────────────────────────────────────────
 _EM_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
