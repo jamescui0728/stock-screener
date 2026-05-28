@@ -1202,6 +1202,7 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
     w_news   = settings.SHORT_NEWS_HEAT_WEIGHT
     w_indrel = settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
     w_pp     = settings.SHORT_PRICING_POWER_WEIGHT
+    w_turn   = settings.SHORT_TURNOVER_WEIGHT
 
     for code, result in results.items():
         if not result:
@@ -1214,10 +1215,11 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
         vp_pct     = r.get("volprice",          sub.get("volprice")          or 50.0)
         tech_pct   = r.get("tech",              sub.get("tech")              or 50.0)
         indrel_pct = r.get("industry_relative", sub.get("industry_relative") or 50.0)
-        # 这两维不排名
+        # 这几维不排名（已经在 0-100 自然尺度上）
         macro_raw  = sub.get("macro")     if sub.get("macro")     is not None else 50.0
         news_raw   = sub.get("news_heat") if sub.get("news_heat") is not None else 50.0
         pp_raw     = sub.get("pricing_power") if sub.get("pricing_power") is not None else 50.0
+        turn_raw   = sub.get("turnover")  if sub.get("turnover")  is not None else 50.0
 
         composite = (
             mom_pct    * w_mom    +
@@ -1226,7 +1228,8 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
             tech_pct   * w_tech   +
             news_raw   * w_news   +
             indrel_pct * w_indrel +
-            pp_raw     * w_pp
+            pp_raw     * w_pp     +
+            turn_raw   * w_turn
         )
         composite = round(max(0, min(100, composite)), 2)
 
@@ -1246,6 +1249,7 @@ def _apply_cross_sectional_ranks(results: dict) -> dict:
             "news_heat":         round(news_raw, 2),
             "industry_relative": round(indrel_pct, 2),
             "pricing_power":     round(pp_raw, 2),
+            "turnover":          round(turn_raw, 2),
             "market_trend":      sub.get("market_trend", 50.0),
         }
         result["short_composite_score"] = composite

@@ -621,5 +621,63 @@ class TestWriteBackPersistsTurnover(unittest.TestCase):
             self.assertIn(col, src, f"batch 写库循环未覆盖 {col}")
 
 
+class TestCrossSectionalRankKeepsTurnover(unittest.TestCase):
+    """回归 Bugbot #11: ranked 路径必须保留 turnover 在 sub_scores 并参与 composite。"""
+
+    def _result(self, turnover_score):
+        sub = {
+            "momentum": 80.0, "volprice": 80.0, "tech": 80.0,
+            "industry_relative": 80.0, "macro": 80.0,
+            "news_heat": 50.0, "pricing_power": 50.0,
+            "turnover": turnover_score,
+            "market_trend": 100.0,
+        }
+        return {
+            "short_composite_score": 80.0,
+            "short_signal": "STRONG_BUY",
+            "short_signal_reason": "",
+            "sub_scores": dict(sub),
+            "details": {"momentum": {"ret_5d": 1.0}},
+        }
+
+    def test_ranked_subscores_contain_turnover(self):
+        from engines.short_signal_engine import _apply_cross_sectional_ranks
+        raw = {"A": self._result(80.0), "B": self._result(20.0)}
+        ranked = _apply_cross_sectional_ranks(raw)
+        # 关键：ranked 路径不能丢 turnover 键（否则 batch 写库会拿到 None 静默抹掉）
+        self.assertIn("turnover", ranked["A"]["sub_scores"])
+        self.assertIn("turnover", ranked["B"]["sub_scores"])
+
+    def test_ranked_composite_formula_includes_turnover_term(self):
+        """源码扫描守门：_apply_cross_sectional_ranks 的 composite 必须包含 turnover 项，
+        否则给 SHORT_TURNOVER_WEIGHT 实权重时 ranked 路径会静默忽略它（Bugbot #11）。"""
+        import inspect
+        from engines.short_signal_engine import _apply_cross_sectional_ranks
+        src = inspect.getsource(_apply_cross_sectional_ranks)
+        self.assertIn("SHORT_TURNOVER_WEIGHT", src,
+                      "ranked composite 未读 SHORT_TURNOVER_WEIGHT")
+        self.assertIn("turn_raw", src,
+                      "ranked composite 未引用 turnover 原始分")
+
+
+class TestWeightValidatorIncludesTurnover(unittest.TestCase):
+    """回归 Bugbot #11: _validate_weights 短期 sum 必须包含 SHORT_TURNOVER_WEIGHT。"""
+
+    def test_validator_source_references_turnover_weight(self):
+        import inspect
+        from config import _validate_weights
+        src = inspect.getsource(_validate_weights)
+        self.assertIn("SHORT_TURNOVER_WEIGHT", src,
+                      "_validate_weights 未把 SHORT_TURNOVER_WEIGHT 纳入校验")
+
+    def test_validator_short_sum_equals_one_at_defaults(self):
+        """默认配置（turnover=0）下短期权重应正好 = 1.0。"""
+        s = (settings.SHORT_MOMENTUM_WEIGHT + settings.SHORT_VOLPRICE_WEIGHT
+             + settings.SHORT_MACRO_WEIGHT + settings.SHORT_TECH_WEIGHT
+             + settings.SHORT_NEWS_HEAT_WEIGHT + settings.SHORT_INDUSTRY_RELATIVE_WEIGHT
+             + settings.SHORT_PRICING_POWER_WEIGHT + settings.SHORT_TURNOVER_WEIGHT)
+        self.assertAlmostEqual(s, 1.0, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()

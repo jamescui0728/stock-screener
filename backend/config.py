@@ -234,7 +234,8 @@ def _validate_weights():
         settings.SHORT_TECH_WEIGHT +
         settings.SHORT_NEWS_HEAT_WEIGHT +
         settings.SHORT_INDUSTRY_RELATIVE_WEIGHT +
-        settings.SHORT_PRICING_POWER_WEIGHT
+        settings.SHORT_PRICING_POWER_WEIGHT +
+        settings.SHORT_TURNOVER_WEIGHT
     )
     if abs(short_sum - 1.0) > 0.001:
         logger.warning(f"短期信号权重总和 = {short_sum:.3f} ≠ 1.0，请检查配置")
