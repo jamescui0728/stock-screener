@@ -469,17 +469,18 @@ class TestNewsObserveDoesNotAffectComposite(unittest.TestCase):
                 _cached_macro_100=50.0, _cached_market_trend={"pass": True},
                 _cached_industry_returns={}, _cached_industries={},
             )
-            # 观察模式开：news_heat 被算出且 veto 压低，但 weight=0
+            # 观察模式开（线上默认，不跳过）：news_heat 被算出且 veto 压低，但 weight=0
             with patch.object(settings, "SHORT_NEWS_HEAT_WEIGHT", 0.0), \
                  patch.object(settings, "SHORT_NEWS_OBSERVE", True):
-                r_obs = generate_short_signal(db, "NEWS01", _news_observe=True, **common)
+                r_obs = generate_short_signal(db, "NEWS01", **common)
             self.assertIsNotNone(r_obs)
             self.assertLessEqual(r_obs["sub_scores"]["news_heat"], 15.0)  # 确实算了且被 veto
 
-            # 对照：observe 关 → news_heat 中性 50
+            # 对照：回测路径跳过 observe（_skip_news_observe=True）→ news_heat 中性 50
             with patch.object(settings, "SHORT_NEWS_HEAT_WEIGHT", 0.0), \
-                 patch.object(settings, "SHORT_NEWS_OBSERVE", False):
-                r_off = generate_short_signal(db, "NEWS01", _news_observe=False, **common)
+                 patch.object(settings, "SHORT_NEWS_OBSERVE", True):
+                r_off = generate_short_signal(db, "NEWS01", _skip_news_observe=True, **common)
+            self.assertEqual(r_off["sub_scores"]["news_heat"], 50.0)  # 跳过 → 中性
 
             # 核心契约：weight=0 → 不同 news_heat 不影响 composite / signal
             self.assertEqual(r_obs["short_composite_score"], r_off["short_composite_score"])
