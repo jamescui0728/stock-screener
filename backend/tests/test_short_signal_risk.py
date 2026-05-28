@@ -433,5 +433,60 @@ class TestNewsHeatScoring(unittest.TestCase):
         self.assertGreaterEqual(boosted["score"], base["score"])
 
 
+class TestNewsObserveDoesNotAffectComposite(unittest.TestCase):
+    """观察模式契约：weight=0 时即使 news_heat 被 veto 压到 15，composite/signal 也不变。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(cls.engine)
+        cls.Session = sessionmaker(bind=cls.engine)
+
+    def _seed_prices(self, db, code, days=30):
+        base = date(2024, 1, 1)
+        for i in range(days):
+            db.add(PriceData(stock_code=code, trade_date=base + timedelta(days=i),
+                             open=10 + i * 0.1, close=10 + i * 0.1, volume=1_000_000))
+        db.commit()
+
+    def test_observe_news_does_not_change_composite(self):
+        from datetime import datetime
+        from engines.short_signal_engine import generate_short_signal
+        from models.models import NewsItem
+
+        db = self.Session()
+        try:
+            db.add(Stock(code="NEWS01", name="测试", is_active=True, industry_code="BK0001"))
+            self._seed_prices(db, "NEWS01")
+            # 强负面监管新闻 → veto → news_heat 被压到 <=15
+            db.add(NewsItem(stock_code="NEWS01", title="公司被证监会立案调查",
+                            summary="涉嫌财务造假 被立案", pub_date=datetime(2024, 1, 29),
+                            sentiment_score=-0.9, event_type="监管"))
+            db.commit()
+
+            common = dict(
+                as_of_date=date(2024, 1, 30), write_back=False, commit=False,
+                _cached_macro_100=50.0, _cached_market_trend={"pass": True},
+                _cached_industry_returns={}, _cached_industries={},
+            )
+            # 观察模式开：news_heat 被算出且 veto 压低，但 weight=0
+            with patch.object(settings, "SHORT_NEWS_HEAT_WEIGHT", 0.0), \
+                 patch.object(settings, "SHORT_NEWS_OBSERVE", True):
+                r_obs = generate_short_signal(db, "NEWS01", _news_observe=True, **common)
+            self.assertIsNotNone(r_obs)
+            self.assertLessEqual(r_obs["sub_scores"]["news_heat"], 15.0)  # 确实算了且被 veto
+
+            # 对照：observe 关 → news_heat 中性 50
+            with patch.object(settings, "SHORT_NEWS_HEAT_WEIGHT", 0.0), \
+                 patch.object(settings, "SHORT_NEWS_OBSERVE", False):
+                r_off = generate_short_signal(db, "NEWS01", _news_observe=False, **common)
+
+            # 核心契约：weight=0 → 不同 news_heat 不影响 composite / signal
+            self.assertEqual(r_obs["short_composite_score"], r_off["short_composite_score"])
+            self.assertEqual(r_obs["short_signal"], r_off["short_signal"])
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

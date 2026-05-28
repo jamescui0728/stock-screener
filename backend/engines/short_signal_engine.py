@@ -834,6 +834,7 @@ def generate_short_signal(
     _cached_stock_returns: Optional[dict] = None,
     _cached_market_trend: Optional[dict] = None,
     _cached_industry_news: Optional[dict] = None,
+    _news_observe: bool = False,
 ) -> Optional[dict]:
     """
     生成短期信号；价格数据不足时返回 None。
@@ -872,8 +873,10 @@ def generate_short_signal(
         _cached_stock=_cached_stock,
         _cached_industries=_cached_industries,
     )
-    # 观察模式：weight=0 时仍计算并写库（前向测试用），但 composite 里乘 0 不影响买卖
-    if settings.SHORT_NEWS_HEAT_WEIGHT > 0 or settings.SHORT_NEWS_OBSERVE:
+    # 观察模式：weight=0 时仍计算并写库（前向测试用），但 composite 里乘 0 不影响买卖。
+    # 仅在线上 generate_all_short_signals 路径（_news_observe=True）才算观察分；
+    # 回测路径不传 → weight=0 时跳过，避免每只×每检查日多跑无用的舆情查询。
+    if settings.SHORT_NEWS_HEAT_WEIGHT > 0 or (settings.SHORT_NEWS_OBSERVE and _news_observe):
         news_heat = score_news_heat(
             db, stock_code, as_of_date,
             _cached_industry_news=_cached_industry_news,
@@ -1276,6 +1279,7 @@ def generate_all_short_signals(db: Session, limit: Optional[int] = None) -> dict
                 _cached_stock_returns=stock_returns,
                 _cached_market_trend=market_trend,
                 _cached_industry_news=industry_news,
+                _news_observe=True,   # 线上路径：观察模式下计算并写库 news_heat
             )
             if r:
                 raw_results[stock.code] = r
