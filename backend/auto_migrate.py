@@ -52,6 +52,10 @@ COLUMN_ADDS = [
 
     # v202f — 短期信号第 7 维（定价权）
     ("stocks", "short_score_pricing_power", "FLOAT"),
+
+    # 换手率（观察模式 — 不影响买卖，仅写库前向测试）
+    ("stocks",     "short_score_turnover", "FLOAT"),
+    ("price_data", "turnover_rate",        "FLOAT"),
 ]
 
 
