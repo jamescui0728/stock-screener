@@ -169,6 +169,23 @@ def _weekly_rescore():
         db.close()
 
 
+def _weekly_news_snapshot():
+    """
+    每周一 04:00：记录舆情观察快照（news_heat 三分位 + 入场价），
+    供 news_heat 前向测试积累多个时点样本。观察期产物，不影响买卖。
+    """
+    from scripts.forward_test_check import create_snapshot
+    db = SessionLocal()
+    try:
+        logger.info("定时任务：记录舆情前向测试快照")
+        path = create_snapshot(db)
+        logger.info(f"定时任务：舆情快照完成 → {path}")
+    except Exception as e:
+        logger.error(f"舆情快照失败: {e}")
+    finally:
+        db.close()
+
+
 def _refresh_paper_price_cache():
     """
     定期刷新所有用户持仓的实时价缓存（保证用户打开模拟盘页面时是热的）。
@@ -242,6 +259,11 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _weekday_refresh_news, "cron",
         day_of_week="mon-fri", hour=9, minute=0, id="weekday_news_refresh",
+    )
+    # 每周一 04:00：舆情前向测试快照（在 daily_update 02:00 重算信号之后）
+    scheduler.add_job(
+        _weekly_news_snapshot, "cron",
+        day_of_week="mon", hour=4, minute=0, id="weekly_news_snapshot",
     )
     # A 股交易时段精细预热持仓实时价（每 8 分钟一次，缓存 TTL 10 分钟，永不过期）
     # 早盘段 9:00-11:59（覆盖正式交易 9:30-11:30 + 集合竞价前 30 分钟 + 午休 30 分钟内的盘后价）
