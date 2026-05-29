@@ -27,10 +27,13 @@ A股短线"起飞"捕捉模型 —— 离线研究脚本（落地版）
       务必用足够长、跨牛熊的样本外数据反复检验。
 """
 from __future__ import annotations
-import sys
+import sys, os
 sys.path.insert(0, ".")
 
 from datetime import date, timedelta
+
+# 热点特征本地缓存目录（由 hot_features_fetch.py 回填；不存在则自动跳过这些特征）
+EXTRA_CACHE_DIR = os.environ.get("HOT_FEATURES_DIR", "/data/hot_features")
 
 import numpy as np
 import pandas as pd
@@ -208,6 +211,92 @@ def make_features(df: pd.DataFrame):
     return df, feat_cols
 
 
+def _col(df, *names):
+    for n in names:
+        if n in df.columns:
+            return n
+    return None
+
+
+def merge_extra_features(feat_df: pd.DataFrame, feat_cols: list):
+    """
+    并入 hot_features_fetch.py 缓存的免费东财特征（封单/连板/炸板/龙虎榜/资金流）。
+    缓存目录不存在或为空 → 原样返回，脚本照常运行。
+
+    防泄漏：
+      - 涨停板池 / 资金流：盘后即当日已知，作信号日特征，不滞后。
+      - 龙虎榜：约 18:00 发布，信号日收盘决策时拿不到 → 滞后 1 个交易日并入。
+    """
+    d = EXTRA_CACHE_DIR
+    if not os.path.isdir(d):
+        return feat_df, feat_cols
+    feat_df = feat_df.copy()
+    added = []
+    # 交易日历（用于龙虎榜滞后到次日）
+    cal = pd.Series(sorted(feat_df["date"].unique()))
+    next_day = {cur: nxt for cur, nxt in zip(cal[:-1], cal[1:])}
+
+    # --- 涨停板池：连板数 / 封板资金 / 炸板次数（当日已知）---
+    p = f"{d}/zt_pool.pkl"
+    if os.path.exists(p):
+        zt = pd.read_pickle(p)
+        cc, td = _col(zt, "代码", "code"), "trade_date"
+        if cc and td in zt.columns:
+            m = pd.DataFrame({"code": zt[cc].astype(str), "date": pd.to_datetime(zt[td])})
+            lb = _col(zt, "连板数", "连续涨停天数")
+            fd = _col(zt, "封板资金", "封单资金")
+            zb = _col(zt, "炸板次数")
+            if lb: m["zt_lianban"] = pd.to_numeric(zt[lb], errors="coerce")
+            if fd: m["zt_fengdan_amt"] = pd.to_numeric(zt[fd], errors="coerce")
+            if zb: m["zt_zhaban_cnt"] = pd.to_numeric(zt[zb], errors="coerce")
+            feat_df = feat_df.merge(m, on=["code", "date"], how="left")
+            for c in ("zt_lianban", "zt_fengdan_amt", "zt_zhaban_cnt"):
+                if c in feat_df.columns:
+                    feat_df[c] = feat_df[c].fillna(0); added.append(c)
+
+    # --- 龙虎榜：净买额 + 上榜标记（滞后 1 个交易日）---
+    p = f"{d}/lhb.pkl"
+    if os.path.exists(p):
+        lhb = pd.read_pickle(p)
+        cc = _col(lhb, "代码", "code")
+        dd = _col(lhb, "上榜日", "交易日", "日期")
+        nb = _col(lhb, "龙虎榜净买额", "净买额", "净买入额")
+        if cc and dd:
+            raw_date = pd.to_datetime(lhb[dd])
+            sig_date = raw_date.map(lambda x: next_day.get(x))   # 滞后到次日
+            m = pd.DataFrame({"code": lhb[cc].astype(str), "date": sig_date,
+                              "lhb_on": 1.0})
+            if nb: m["lhb_net_buy"] = pd.to_numeric(lhb[nb], errors="coerce")
+            m = m.dropna(subset=["date"]).groupby(["code", "date"], as_index=False).agg(
+                {**({"lhb_net_buy": "sum"} if nb else {}), "lhb_on": "max"})
+            feat_df = feat_df.merge(m, on=["code", "date"], how="left")
+            for c in ("lhb_on", "lhb_net_buy"):
+                if c in feat_df.columns:
+                    feat_df[c] = feat_df[c].fillna(0); added.append(c)
+
+    # --- 个股资金流：主力 / 超大单净流入占比（当日已知）---
+    p = f"{d}/fund_flow.pkl"
+    if os.path.exists(p):
+        ff = pd.read_pickle(p)
+        cc = _col(ff, "code", "代码")
+        dd = _col(ff, "日期", "date")
+        mr = _col(ff, "主力净流入-净占比", "主力净流入净占比")
+        sr = _col(ff, "超大单净流入-净占比", "超大单净流入净占比")
+        if cc and dd:
+            m = pd.DataFrame({"code": ff[cc].astype(str), "date": pd.to_datetime(ff[dd])})
+            if mr: m["ff_main_ratio"] = pd.to_numeric(ff[mr], errors="coerce")
+            if sr: m["ff_superbig_ratio"] = pd.to_numeric(ff[sr], errors="coerce")
+            feat_df = feat_df.merge(m, on=["code", "date"], how="left")
+            for c in ("ff_main_ratio", "ff_superbig_ratio"):
+                if c in feat_df.columns:
+                    added.append(c)   # 资金流缺失保留 NaN（HGB 原生支持）
+
+    if added:
+        print(f"   [extra] 并入热点特征 {len(added)} 个: {added}")
+        feat_cols = feat_cols + added
+    return feat_df, feat_cols
+
+
 # =============================================================================
 # 4. 防泄漏切分（Purged + Embargo）
 # =============================================================================
@@ -333,7 +422,8 @@ def main(cfg: Config):
             print("   无样本，退出"); return
         print(f"   样本 {len(labels)}，正样本(起飞)占比 {labels['label'].mean():.1%}")
         print("3) 特征工程…")
-        feat_df, feat_cols = make_features(panel)
+        feat_df, core_cols = make_features(panel)
+        feat_df, feat_cols = merge_extra_features(feat_df, core_cols)   # 缓存存在则并入热点特征
         data = labels.merge(feat_df[["date", "code"] + feat_cols],
                             on=["date", "code"], how="left")
         single_factor_ic(data, feat_cols)
@@ -342,7 +432,8 @@ def main(cfg: Config):
         if model is None:
             return
         print(f"5) 样本外打分 + 带约束回测（仅末折验证期 {len(val_dates)} 天，无泄漏）…")
-        fd = feat_df.dropna(subset=feat_cols).copy()
+        # 只对核心特征去 NaN；额外热点特征(可能稀疏)的缺失交给 HGB 原生处理
+        fd = feat_df.dropna(subset=core_cols).copy()
         fd = fd[fd["date"].isin(val_dates)].copy()
         if fd.empty:
             print("   样本外无可打分行"); return
