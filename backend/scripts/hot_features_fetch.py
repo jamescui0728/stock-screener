@@ -101,6 +101,52 @@ def probe():
 
 
 # ──────────────────────────────────────────────
+# 增量落盘 helper（断点续跑：循环中每 CHECKPOINT 次并入磁盘，崩溃不丢进度）
+# ──────────────────────────────────────────────
+CHECKPOINT = 50
+
+def _flush(path: str, frames: list, keys: tuple):
+    """把内存帧并入磁盘已有数据(按 keys 去重)后落盘，并清空 frames。"""
+    if not frames:
+        return
+    new = pd.concat(frames, ignore_index=True)
+    if os.path.exists(path):
+        try:
+            new = pd.concat([pd.read_pickle(path), new], ignore_index=True)
+        except Exception:
+            pass
+    k = [c for c in keys if c in new.columns]
+    if k:
+        new = new.drop_duplicates(subset=k, keep="last")
+    new.to_pickle(path)
+    frames.clear()
+
+
+def _done_values(path: str, col: str) -> set:
+    """读已落盘文件里某列的取值集合，用于跳过已完成项（断点续跑）。"""
+    if os.path.exists(path):
+        try:
+            return set(pd.read_pickle(path)[col].astype(str))
+        except Exception:
+            return set()
+    return set()
+
+
+def _done_dates(path: str) -> set:
+    """已落盘的 trade_date 集合（统一 %Y-%m-%d 字符串），用于日期续跑跳过。"""
+    if os.path.exists(path):
+        try:
+            return set(pd.to_datetime(pd.read_pickle(path)["trade_date"]).dt.strftime("%Y-%m-%d"))
+        except Exception:
+            return set()
+    return set()
+
+
+def _ds(d):
+    return d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d).replace("-", "")
+
+
+# ──────────────────────────────────────────────
 # 回填到本地缓存
 # ──────────────────────────────────────────────
 def backfill(start: str, end: str | None = None):
@@ -108,11 +154,16 @@ def backfill(start: str, end: str | None = None):
     dates = _trading_dates(start, end)
     if not dates:
         print("无交易日历，先确保 PriceData 有基准指数数据"); return
-    print(f"回填 {len(dates)} 个交易日 → {CACHE_DIR}（失败的日期会跳过，可重复执行补齐）")
+    zt_path, zb_path = f"{CACHE_DIR}/zt_pool.pkl", f"{CACHE_DIR}/zbgc_pool.pkl"
+    done = _done_dates(zt_path)   # 已完成日期（续跑跳过）
+    print(f"回填 {len(dates)} 个交易日 → {CACHE_DIR}"
+          f"（每 {CHECKPOINT} 天落盘一次，可断点续跑；已完成 {len(done)} 天将跳过）")
 
     zt_rows, zb_rows = [], []
     for i, d in enumerate(dates, 1):
-        ds = d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d).replace("-", "")
+        if pd.to_datetime(d).strftime("%Y-%m-%d") in done:
+            continue
+        ds = _ds(d)
         df = fetch_zt_pool(ds)
         if df is not None and not df.empty:
             df = df.copy(); df["trade_date"] = pd.to_datetime(d); zt_rows.append(df)
@@ -120,22 +171,16 @@ def backfill(start: str, end: str | None = None):
         if zb is not None and not zb.empty:
             zb = zb.copy(); zb["trade_date"] = pd.to_datetime(d); zb_rows.append(zb)
         time.sleep(0.3)
-        if i % 50 == 0 or i == len(dates):
-            print(f"  涨停/炸板 [{i}/{len(dates)}]")
-    if zt_rows:
-        pd.concat(zt_rows, ignore_index=True).to_pickle(f"{CACHE_DIR}/zt_pool.pkl")
-        print(f"  写 zt_pool.pkl（{sum(len(x) for x in zt_rows)} 行）")
-    if zb_rows:
-        pd.concat(zb_rows, ignore_index=True).to_pickle(f"{CACHE_DIR}/zbgc_pool.pkl")
-        print(f"  写 zbgc_pool.pkl（{sum(len(x) for x in zb_rows)} 行）")
+        if i % CHECKPOINT == 0 or i == len(dates):
+            _flush(zt_path, zt_rows, ("代码", "trade_date"))
+            _flush(zb_path, zb_rows, ("代码", "trade_date"))
+            print(f"  涨停/炸板 [{i}/{len(dates)}] 已落盘")
 
-    # 龙虎榜：区间一次拉
-    lhb = fetch_lhb(dates[0].strftime("%Y%m%d") if hasattr(dates[0], "strftime") else str(dates[0]).replace("-", ""),
-                    dates[-1].strftime("%Y%m%d") if hasattr(dates[-1], "strftime") else str(dates[-1]).replace("-", ""))
+    # 龙虎榜：区间一次拉（区间接口，无需增量）
+    lhb = fetch_lhb(_ds(dates[0]), _ds(dates[-1]))
     if lhb is not None and not lhb.empty:
         lhb.to_pickle(f"{CACHE_DIR}/lhb.pkl"); print(f"  写 lhb.pkl（{len(lhb)} 行）")
 
-    # 资金流：逐只（量大，建议先确认网络稳定再开；这里给出循环，失败跳过）
     print("  个股资金流回填较重（逐只 ~5500 次），如需请取消注释 _backfill_fund_flow()")
     # _backfill_fund_flow()
 
@@ -147,17 +192,19 @@ def _backfill_fund_flow():
         codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
     finally:
         db.close()
+    path = f"{CACHE_DIR}/fund_flow.pkl"
+    done = _done_values(path, "code")
     rows = []
     for i, c in enumerate(codes, 1):
+        if c in done:
+            continue
         df = fetch_fund_flow_hist(c)
         if df is not None and not df.empty:
             df = df.copy(); df["code"] = c; rows.append(df)
         time.sleep(0.2)
-        if i % 200 == 0:
-            print(f"  资金流 [{i}/{len(codes)}]")
-    if rows:
-        pd.concat(rows, ignore_index=True).to_pickle(f"{CACHE_DIR}/fund_flow.pkl")
-        print(f"  写 fund_flow.pkl（{sum(len(x) for x in rows)} 行）")
+        if i % 200 == 0 or i == len(codes):
+            _flush(path, rows, ("code", "日期"))
+            print(f"  资金流 [{i}/{len(codes)}] 已落盘")
 
 
 # ──────────────────────────────────────────────
@@ -183,29 +230,30 @@ def backfill_tushare_limit(start: str, end: str | None = None, token: str | None
     dates = _trading_dates(start, end)
     if not dates:
         print("无交易日历"); return
-    print(f"Tushare 回填 {len(dates)} 个交易日的历史涨停板 → zt_pool.pkl")
+    path = f"{CACHE_DIR}/zt_pool.pkl"
+    done = _done_dates(path)   # 续跑跳过
+    print(f"Tushare 回填 {len(dates)} 个交易日历史涨停板 → zt_pool.pkl"
+          f"（每 {CHECKPOINT} 天落盘，可断点续跑；已完成 {len(done)} 天跳过）")
     out = []
     for i, d in enumerate(dates, 1):
-        ds = d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d).replace("-", "")
+        if pd.to_datetime(d).strftime("%Y-%m-%d") in done:
+            continue
         try:
-            df = pro.limit_list_d(trade_date=ds, limit_type="U")
+            df = pro.limit_list_d(trade_date=_ds(d), limit_type="U")
         except Exception as e:
-            print(f"  {ds} FAIL {type(e).__name__}: {str(e)[:50]}"); time.sleep(0.5); continue
+            print(f"  {_ds(d)} FAIL {type(e).__name__}: {str(e)[:50]}"); time.sleep(0.5); continue
         if df is not None and not df.empty:
-            m = pd.DataFrame({
+            out.append(pd.DataFrame({
                 "代码": df["ts_code"].str[:6],
                 "trade_date": pd.to_datetime(d),
                 "封板资金": pd.to_numeric(df.get("fd_amount"), errors="coerce"),
                 "炸板次数": pd.to_numeric(df.get("open_times"), errors="coerce"),
                 "连板数": pd.to_numeric(df.get("limit_times"), errors="coerce"),
-            })
-            out.append(m)
+            }))
         time.sleep(0.4)
-        if i % 50 == 0 or i == len(dates):
-            print(f"  [{i}/{len(dates)}]")
-    if out:
-        pd.concat(out, ignore_index=True).to_pickle(f"{CACHE_DIR}/zt_pool.pkl")
-        print(f"  写 zt_pool.pkl（{sum(len(x) for x in out)} 行，覆盖 Tushare 历史）")
+        if i % CHECKPOINT == 0 or i == len(dates):
+            _flush(path, out, ("代码", "trade_date"))
+            print(f"  [{i}/{len(dates)}] 已落盘")
 
 
 if __name__ == "__main__":
