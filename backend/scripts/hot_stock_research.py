@@ -132,6 +132,43 @@ def load_price_panel(db, cfg: Config) -> pd.DataFrame:
     return df, max_date
 
 
+def add_life_pctile(db, panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    上市以来价格分位（point-in-time，防泄漏）：每个 (股票, 信号日) 取该股
+    【自上市至该日】全部后复权收盘里、当日收盘所处的百分位（0≈历史最低，1≈历史最高）。
+
+    必须用全历史（不能只用研究窗口，否则只是"近 N 年分位"）→ 单独拉一次全历史
+    收盘，按股票做 expanding 百分位，再合并回窗口内的 panel。
+    min_periods=60：上市不足 60 个交易日的早期段为 NaN。
+    """
+    codes = sorted(panel["code"].unique())
+    win_start = panel["date"].min()
+    # 小批(100 只)流式：每批算完分位后只保留窗口内结果、丢弃全历史，控制瞬时内存
+    # （容器内 uvicorn 常驻已占内存，一次性物化全历史会 OOM）
+    results, B = [], 100
+    for i in range(0, len(codes), B):
+        batch = codes[i:i + B]
+        rows = (db.query(PriceData.stock_code, PriceData.trade_date, PriceData.close)
+                .filter(PriceData.stock_code.in_(batch),
+                        PriceData.close.isnot(None), PriceData.close > 0)
+                .all())
+        if not rows:
+            continue
+        h = pd.DataFrame(rows, columns=["code", "date", "close"])
+        h["date"] = pd.to_datetime(h["date"])
+        h = h.sort_values(["code", "date"])
+        h["price_pctile_life"] = h.groupby("code")["close"].transform(
+            lambda s: s.expanding(min_periods=60).rank(pct=True))
+        results.append(h.loc[h["date"] >= win_start,
+                             ["code", "date", "price_pctile_life"]])
+        del rows, h
+    if not results:
+        panel["price_pctile_life"] = np.nan
+        return panel
+    pct = pd.concat(results, ignore_index=True)
+    return panel.merge(pct, on=["code", "date"], how="left")
+
+
 # =============================================================================
 # 2. 三重门标签（后复权 → 用累计涨跌幅判轨；次日开盘买入；一字涨停剔除）
 # =============================================================================
@@ -196,6 +233,8 @@ def make_features(df: pd.DataFrame):
     df["limit_up_cnt5"] = g["is_limit_up"].transform(lambda x: x.rolling(5).sum())
     df["high20"] = g["high"].transform(lambda x: x.rolling(20).max())
     df["near_high20"] = df["close"] / df["high20"]                       # 距20日高位
+    # 注：price_pctile_life（上市以来价格分位）由 add_life_pctile 用【全历史】预先算好
+    #     并合并进 panel，这里不重算（窗口内 expanding 只会得到"近 N 年分位"）。
     for w in (5, 10, 20):
         df[f"ma{w}"] = g["close"].transform(lambda x: x.rolling(w).mean())
     df["ma_spread"] = df[["ma5", "ma10", "ma20"]].std(axis=1) / df["close"]  # 均线发散度
@@ -209,8 +248,8 @@ def make_features(df: pd.DataFrame):
 
     feat_cols = [
         "vol_ratio", "amount_surge", "turnover_pct60", "close_pos", "upper_shadow",
-        "ret1", "is_limit_up", "limit_up_cnt5", "near_high20", "ma_spread", "above_ma20",
-        "sector_limit_cnt", "mkt_limit_cnt", "sector_rank",
+        "ret1", "is_limit_up", "limit_up_cnt5", "near_high20", "price_pctile_life",
+        "ma_spread", "above_ma20", "sector_limit_cnt", "mkt_limit_cnt", "sector_rank",
     ]
     return df, feat_cols
 
@@ -420,6 +459,8 @@ def main(cfg: Config):
         print("1) 加载真实价格面板…")
         panel, max_date = load_price_panel(db, cfg)
         print(f"   股票 {panel['code'].nunique()} 只，{len(panel)} 行，至 {max_date}")
+        print("1b) 计算上市以来价格分位（全历史，防泄漏）…")
+        panel = add_life_pctile(db, panel)
         print("2) 三重门标签…")
         labels = make_labels(panel, cfg)
         if labels.empty:
