@@ -131,6 +131,13 @@
             <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
+        <el-table-column label="历史分位" width="120" sortable prop="price_pctile_life">
+          <template #default="{ row }">
+            <ScoreBar v-if="row.price_pctile_life != null"
+                      :score="row.price_pctile_life * 100" :max="100" suffix="%" color="#0ea5e9" />
+            <span v-else class="no-data">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="基本面" width="120" sortable prop="fundamental_score">
           <template #default="{ row }">
             <ScoreBar :score="row.fundamental_score" :max="80" color="#67c23a" />

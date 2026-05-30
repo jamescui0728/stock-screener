@@ -14,13 +14,14 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-  score: { type: Number, default: 0 },
-  max:   { type: Number, default: 100 },
-  color: { type: String, default: '#409eff' },
+  score:  { type: Number, default: 0 },
+  max:    { type: Number, default: 100 },
+  color:  { type: String, default: '#409eff' },
+  suffix: { type: String, default: '' },   // 如 "%"
 })
 
 const pct          = computed(() => Math.min(100, Math.max(0, (props.score || 0) / props.max * 100)))
-const displayScore = computed(() => props.score != null ? props.score.toFixed(1) : '-')
+const displayScore = computed(() => props.score != null ? props.score.toFixed(1) + props.suffix : '-')
 </script>
 
 <style scoped>
