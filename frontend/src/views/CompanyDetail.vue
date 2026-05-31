@@ -66,10 +66,10 @@
               <ScoreItem label="财务稳健" :score="detail.info.score_financial_health" :max="15" color="#00bcd4" />
               <ScoreItem label="估值安全" :score="detail.info.score_valuation" :max="20" color="#f56c6c" />
               <div class="pctile-row" v-if="detail.info.price_pctile_life != null">
-                <span class="pctile-label">历史分位</span>
+                <span class="pctile-label">总收益分位</span>
                 <ScoreBar :score="detail.info.price_pctile_life * 100" :max="100"
                           suffix="%" color="#0ea5e9" />
-                <el-tooltip content="最新收盘价在该股上市以来全部收盘价中的百分位（0%≈历史最低，100%≈历史最高）" placement="top">
+                <el-tooltip content="后复权收盘价（含分红再投）在该股上市以来全历史中的百分位。反映持有总收益高低位，非市价距历史高低点（高股息股会偏高）。" placement="top">
                   <el-icon class="pctile-hint"><InfoFilled /></el-icon>
                 </el-tooltip>
               </div>
