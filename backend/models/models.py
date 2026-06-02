@@ -100,7 +100,7 @@ class Stock(Base):
     short_score_industry_relative = Column(Float, nullable=True)   # v202 第 6 维
     short_score_pricing_power     = Column(Float, nullable=True)   # v202f 第 7 维
     short_score_turnover          = Column(Float, nullable=True)   # 换手率（观察模式，weight=0）
-    price_pctile_life = Column(Float, nullable=True)   # 上市以来价格分位 0-1（最新收盘在全历史中的位置）
+    price_pctile_life = Column(Float, nullable=True)   # 上市以来总收益分位 0-1（最新后复权收盘<含分红>在全历史中的位置，非市价分位）
 
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
