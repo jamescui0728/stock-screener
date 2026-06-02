@@ -1162,6 +1162,8 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_score_pricing_power":      s.short_score_pricing_power,
         "short_score_turnover":           s.short_score_turnover,
         "short_observe_candidate": _short_observe_candidate(s),
+        # 上市以来总收益分位（后复权含分红，描述性，0-1，非市价分位）
+        "price_pctile_life":      s.price_pctile_life,
     }
 
 

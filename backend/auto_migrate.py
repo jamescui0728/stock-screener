@@ -56,6 +56,9 @@ COLUMN_ADDS = [
     # 换手率（观察模式 — 不影响买卖，仅写库前向测试）
     ("stocks",     "short_score_turnover", "FLOAT"),
     ("price_data", "turnover_rate",        "FLOAT"),
+
+    # 上市以来价格分位（描述性指标，仅展示）
+    ("stocks", "price_pctile_life", "FLOAT"),
 ]
 
 

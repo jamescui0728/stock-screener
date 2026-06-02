@@ -71,6 +71,14 @@ def _daily_data_update():
         except Exception as e:
             logger.error(f"定时任务：换手率快照失败: {e}")
 
+        # 1d. 上市以来价格分位（描述性指标，随最新价刷新）
+        try:
+            from engines.price_position import compute_price_pctile_life
+            n = compute_price_pctile_life(db)
+            logger.info(f"定时任务：上市以来价格分位 更新 {n} 只")
+        except Exception as e:
+            logger.error(f"定时任务：价格分位计算失败: {e}")
+
         fetch_macro_data(db)
         fetch_all_financial_data(db, limit=200)
         analyze_all_news(db)

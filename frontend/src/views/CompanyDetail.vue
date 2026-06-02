@@ -65,6 +65,14 @@
               <ScoreItem label="现金流健康" :score="detail.info.score_cashflow" :max="20" color="#9c27b0" />
               <ScoreItem label="财务稳健" :score="detail.info.score_financial_health" :max="15" color="#00bcd4" />
               <ScoreItem label="估值安全" :score="detail.info.score_valuation" :max="20" color="#f56c6c" />
+              <div class="pctile-row" v-if="detail.info.price_pctile_life != null">
+                <span class="pctile-label">总收益分位</span>
+                <ScoreBar :score="detail.info.price_pctile_life * 100" :max="100"
+                          suffix="%" color="#0ea5e9" />
+                <el-tooltip content="后复权收盘价（含分红再投）在该股上市以来全历史中的百分位。反映持有总收益高低位，非市价距历史高低点（高股息股会偏高）。" placement="top">
+                  <el-icon class="pctile-hint"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </div>
             </div>
           </el-col>
         </el-row>
@@ -146,6 +154,7 @@ import { ElMessage } from 'element-plus'
 import { stockApi, watchlistApi, dataApi } from '@/api'
 import SignalBadge from '@/components/SignalBadge.vue'
 import ScoreItem from '@/components/ScoreItem.vue'
+import ScoreBar from '@/components/ScoreBar.vue'
 
 const route       = useRoute()
 const router      = useRouter()
@@ -359,6 +368,10 @@ onMounted(load)
 .chart-card   { margin-bottom: 20px; }
 .card-header  { display: flex; justify-content: space-between; align-items: center; }
 .score-grid   { display: flex; flex-direction: column; gap: 10px; padding: 10px 0; }
+.pctile-row   { display: flex; align-items: center; gap: 12px; margin-top: 4px;
+                padding-top: 10px; border-top: 1px dashed #ebedf0; }
+.pctile-label { width: 80px; font-size: 13px; color: #555; flex-shrink: 0; }
+.pctile-hint  { color: #aaa; cursor: help; }
 .news-card    { height: 100%; }
 .news-list    { max-height: 380px; overflow-y: auto; }
 .news-item    { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
