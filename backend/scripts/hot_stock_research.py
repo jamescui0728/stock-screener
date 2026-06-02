@@ -66,7 +66,7 @@ class Config:
     MIN_HISTORY = 120       # 窗口内最少交易日（代理新股剔除 + 保证特征可算）
     # 训练
     N_SPLITS = 4
-    EMBARGO_DAYS = HORIZON + 1   # Purged CV 隔离期 >= 标签窗口，防重叠泄漏
+    EMBARGO_DAYS = HORIZON + 1   # Purged CV 隔离期（交易日，>= 标签窗口 HORIZON）防重叠泄漏
     CALIBRATE = True             # 概率校准（Isotonic）
     # 回测
     TOP_K = 5
@@ -344,12 +344,14 @@ def merge_extra_features(feat_df: pd.DataFrame, feat_cols: list):
 # 4. 防泄漏切分（Purged + Embargo）
 # =============================================================================
 def purged_time_split(dates: pd.Series, n_splits=4, embargo_days=6):
+    # embargo_days 按【交易日】计（与 HORIZON 同单位）：在交易日历 uniq 上按下标
+    # 往前推 embargo_days 个交易日做隔离，避免日历天换算（节假日不固定）导致隔离不足。
     uniq = np.sort(dates.unique())
     folds = np.array_split(uniq, n_splits + 1)
-    emb = np.timedelta64(embargo_days, "D")
     for i in range(1, len(folds)):
         val_days = folds[i]
-        cut = val_days[0] - emb
+        cut_idx = max(0, int(np.searchsorted(uniq, val_days[0])) - embargo_days)
+        cut = uniq[cut_idx]
         yield (dates < cut).values, dates.isin(val_days).values
 
 
