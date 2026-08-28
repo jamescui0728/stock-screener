@@ -31,19 +31,25 @@ scheduler = AsyncIOScheduler()
 def _daily_data_update():
     """
     每天凌晨 2 点的全量数据更新链路：
-      1. 价格数据（A 股 + 沪深300 基准）— v202h 加入，之前漏了导致信号用陈旧价
+      1. 价格数据（A 股 + 沪深300 基准）
       2. 宏观数据
       3. 财报数据
       4. 新闻情感分析
-      5. 长期信号 + 短期信号
+      5. EMA20 跟随纪律标签 + MACD 零轴上方回踩金叉（全市场）
+
+    ⚠️ 长期信号 / 短期信号 / 自动跟单已从本链路移除。
+    原因：两套买卖信号实测准确度不佳，改用 engines/watch_tag.py + engines/macd.py
+    的规则体系。引擎代码、DB 列、手动触发接口（/api/signals/refresh-all、
+    /api/signals/refresh-short、/api/paper/auto-follow/run）全部保留，随时可以恢复
+    ——把下面注释掉的三步放回来即可。自动跟单账户因此停止自动买卖，
+    持仓与历史流水原样冻结。
     """
     from data.fetcher import (
         fetch_macro_data, fetch_all_financial_data, fetch_all_price_data,
         fetch_turnover_today,
     )
     from data.sentiment import analyze_all_news
-    from engines.signal_engine import generate_all_signals
-    from engines.short_signal_engine import generate_all_short_signals
+    from engines.watch_tag import scan_market
     from backtest.engine import ensure_benchmark_data
 
     db = SessionLocal()
@@ -82,16 +88,26 @@ def _daily_data_update():
         fetch_macro_data(db)
         fetch_all_financial_data(db, limit=200)
         analyze_all_news(db)
-        generate_all_signals(db)
-        generate_all_short_signals(db)
 
-        # v202h：自动跟单（在信号刷新之后跑）
+        # 5. 全市场纪律标签 + MACD 关注（必须排在价格更新之后，否则算的是旧 K 线）
         try:
-            from engines.auto_follow import run_v202g_auto_follow
-            r = run_v202g_auto_follow(db)
-            logger.info(f"v202g 自动跟单：买 {r['bought_n']} / 卖 {r['sold_n']} / 跳过 {r['skipped_n']}")
+            r = scan_market(db)
+            logger.info(
+                f"定时任务：纪律标签 {r['tag_counts']}，"
+                f"MACD 零轴上方回踩金叉 {r['macd_cross_up']} 只"
+            )
         except Exception as e:
-            logger.error(f"v202g 自动跟单失败：{e}")
+            logger.error(f"定时任务：纪律标签扫描失败: {e}")
+
+        # ── 已停用（引擎保留，可随时恢复）──────────────────────
+        # 两套买卖信号实测准确度不佳，2026-08 起不再每日自动计算。
+        # 需要恢复时把下面三行取消注释，并把上面的 import 补回来：
+        #   generate_all_signals(db)                     # 长期信号
+        #   generate_all_short_signals(db)               # 短期信号
+        #   run_v202g_auto_follow(db)                    # 自动跟单（吃短期信号）
+        # 仍可随时手动触发：POST /api/signals/refresh-all
+        #                    POST /api/signals/refresh-short
+        #                    POST /api/paper/auto-follow/run（仅管理员）
 
         logger.info("定时任务：每日更新完成")
     except Exception as e:
@@ -107,7 +123,9 @@ def _weekday_refresh_news():
       1. 所有用户自选股（保持原行为）
       2. 全部科技板块 active 股票（TECH_INDUSTRIES，~450 只）
          — 为后续短期信号"科技板块上调舆情权重"打数据基础
-      3. 当前 BUY / STRONG_BUY 候选（~30 只，已经被信号挑出来的）
+      3. 当前规则命中的候选：纪律标签「可跟进」或 MACD 零轴上方回踩金叉
+         （原先取 short_signal 的 BUY/STRONG_BUY，短期信号停算后那个名单会冻死，
+          故改取每日重算的 watch_tag / macd_cross_up）
     去重后约 500-700 只 / 天，每只 0.5s 节流，总耗时 ~5-10 分钟
     """
     import time as _time
@@ -128,12 +146,14 @@ def _weekday_refresh_news():
             .all()
         }
 
-        # 当前 BUY 候选（依赖最新 short_signal 状态）
+        # 当前规则命中的候选（依赖每日重算的 watch_tag / macd_cross_up）
+        from sqlalchemy import or_
         buy_codes = {
             r[0] for r in
             db.query(Stock.code)
             .filter(Stock.is_active == True,
-                    Stock.short_signal.in_(("BUY", "STRONG_BUY")))
+                    or_(Stock.watch_tag == "FOLLOW",
+                        Stock.macd_cross_up == True))
             .all()
         }
 
@@ -143,7 +163,7 @@ def _weekday_refresh_news():
             return
         logger.info(
             f"定时任务：开始刷新新闻 — 自选 {len(watchlist_codes)} + "
-            f"科技板块 {len(tech_codes)} + BUY 候选 {len(buy_codes)} "
+            f"科技板块 {len(tech_codes)} + 规则命中 {len(buy_codes)} "
             f"= 去重 {len(codes)} 只"
         )
 

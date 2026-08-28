@@ -17,10 +17,13 @@ A 股长期价值投资量化筛选工具：**基本面 + 估值 + 行业 + 宏�
 
 | 模块 | 功能 |
 |---|---|
-| **公司筛选** | 5196 只 A 股按综合分排序，可按信号 / 行业 / 基本面分过滤 |
-| **行业全景** | 申万一级 216 个行业评分（营收稳定性、利润稳定性、抗周期性、竞争格局） |
+| **公司筛选** | 全市场 A 股（约 5500 只）按综合分排序，可按信号 / 行业 / 基本面分过滤 |
+| **长期信号** | 基本面 + 估值 + 舆情 + 宏观 → 综合分 + 8 道门槛 → 5 等级信号，持有 6-12 个月 |
+| **短期信号** | 量价 + 宏观 + 行业相对等 8 维**反转**打分 + 大盘趋势门槛，持有 1-2 周 |
+| **行业全景** | 东财行业板块评分（营收稳定性、利润稳定性、抗周期性、竞争格局） |
 | **自选股** | 关注列表 + 工作日 09:00 自动汇总最新公司新闻（含情感分析） |
 | **模拟盘** | 多账户、实时报价（Sina）、买入/卖出、持仓估值、交易流水、信号联动 |
+| **自动跟单** | 系统账户每天跟着短期信号自动买卖，用真实费率前向验证策略表现 |
 | **回测中心** | 按历史时点回放信号，分窗口胜率 / α / IC / 夏普比统计 |
 | **参数设置** | 评分权重、阈值、买卖规则的热更新（无需重启） |
 | **用户管理** | 多用户认证（手机号 + bcrypt + JWT），管理员可创建/重置密码 |
@@ -131,38 +134,47 @@ stock-screener/
 │   ├── API.md                # REST 接口参考
 │   ├── DEVELOPMENT.md        # 开发指南 / 约定 / 常见任务
 │   └── CHANGELOG.md          # 版本变更记录
+├── .github/workflows/ci.yml  # CI：后端语法+单测、前端 build、Docker 构建
 ├── backend/
 │   ├── Dockerfile            # Python 3.11-slim 镜像
 │   ├── .dockerignore
-│   ├── main.py               # FastAPI 入口 / 定时任务注册
+│   ├── main.py               # FastAPI 入口 / 定时任务注册 / 文档渲染路由
 │   ├── config.py             # 全局配置（评分权重、阈值等，可被 user_settings.json 覆盖）
 │   ├── database.py           # SQLAlchemy 引擎 / Session
 │   ├── auth.py               # JWT + bcrypt 鉴权
+│   ├── auto_migrate.py       # 幂等 schema 迁移（启动时补齐新列 / 索引）
 │   ├── api/
-│   │   ├── routes.py         # 业务 endpoint（200+ 行）
+│   │   ├── routes.py         # 业务 endpoint（最大的路由文件，约 1200 行）
 │   │   └── auth_routes.py    # 登录 / 注册 / 用户管理
-│   ├── models/models.py      # SQLAlchemy ORM 模型
+│   ├── models/models.py      # SQLAlchemy ORM 模型（13 张表）
 │   ├── engines/              # 核心算法
-│   │   ├── company_scorer.py # 公司基本面评分（0-80）+ 估值评分（0-20）
-│   │   ├── industry_scorer.py# 行业景气度评分（0-100）
-│   │   ├── signal_engine.py  # 综合信号引擎（5 等级 + 8 道门槛）
-│   │   └── paper_trade.py    # 模拟盘业务逻辑
+│   │   ├── company_scorer.py      # 公司基本面评分（0-80）+ 估值评分（0-20）
+│   │   ├── industry_scorer.py     # 行业景气度评分（0-100）
+│   │   ├── signal_engine.py       # 长期信号引擎（5 等级 + 8 道门槛）
+│   │   ├── short_signal_engine.py # 短期反转信号引擎（8 维 + 大盘趋势门槛）
+│   │   ├── price_position.py      # 上市以来总收益分位
+│   │   ├── paper_trade.py         # 模拟盘业务逻辑
+│   │   └── auto_follow.py         # v202g 自动跟单（短期信号 → 系统账户）
 │   ├── data/
 │   │   ├── fetcher.py        # akshare 数据抓取（财报 / 行情 / 宏观 / 新闻）
-│   │   └── sentiment.py      # 新闻情感分析（jieba 词典 + 关键词权重）
+│   │   ├── sentiment.py      # 新闻情感分析（jieba 词典 + 关键词权重）
+│   │   ├── task_tracker.py   # 后台任务状态（refresh-all 进度）
+│   │   └── fetch_progress.py # 抓取进度
 │   ├── backtest/
 │   │   ├── engine.py         # 滚动窗口回测引擎
 │   │   ├── evaluator.py      # 报告生成
-│   │   └── optimizer.py      # 贝叶斯参数优化
-│   ├── scripts/              # 一次性维护脚本（迁移、数据修复等）
-│   └── stock_screener.db     # SQLite 数据库
+│   │   ├── optimizer.py      # 贝叶斯参数优化
+│   │   └── progress.py       # 回测进度（SSE 推送用）
+│   ├── tests/                # unittest（内存 SQLite，不碰真库）
+│   ├── scripts/              # 一次性维护脚本（迁移、数据修复、诊断等）
+│   └── stock_screener.db     # SQLite 数据库（gitignore，运行后生成）
 └── frontend/
     ├── Dockerfile            # multi-stage：Node 构建 → nginx 服务
     ├── nginx.conf            # SPA fallback + /api 反代到 backend 容器
     ├── .dockerignore
     ├── package.json
     └── src/
-        ├── views/            # 页面（10 个）
+        ├── views/            # 页面（筛选/详情/行业/自选/模拟盘/自动跟单/回测/设置/用户/登录/注册）
         ├── components/       # 共享组件（SignalBadge、ScoreBar 等）
         ├── api/index.js      # axios 封装 + endpoint 集合
         ├── router/           # Vue Router + 路由守卫
@@ -176,12 +188,18 @@ stock-screener/
 
 | 文档 | 内容 |
 |---|---|
-| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | 信号引擎设计、5 等级阈值、8 道门槛、评分体系、模拟盘多账户、缓存策略 |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | 长/短期两套信号引擎、5 等级阈值、8 道门槛、评分体系、模拟盘多账户、自动跟单、缓存策略 |
 | **[docs/API.md](docs/API.md)** | 全部 REST 接口、参数说明、请求/响应示例 |
-| **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** | 添加新功能 / 改阈值 / 加新数据源 / 调试技巧 |
+| **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** | 添加新功能 / 改阈值 / 加新数据源 / 跑测试 / 调试技巧 |
 | **[docs/CHANGELOG.md](docs/CHANGELOG.md)** | 版本演进（v100 → v108 + 多账户重构、东方财富宏观源接入等） |
 
-后端 OpenAPI 文档自动生成：**http://localhost:8000/docs**
+后端起来之后，这些文档也能直接在浏览器里看（`main.py` 渲染 markdown）：
+
+| 地址 | 内容 |
+|---|---|
+| http://localhost:8000/docs | OpenAPI 自动文档（带 Try-it-out） |
+| http://localhost:8000/readme | 本文 |
+| http://localhost:8000/project-docs/ | `docs/` 索引，点进去看各篇 |
 
 ---
 
@@ -189,6 +207,8 @@ stock-screener/
 
 - **数据驱动校准**：所有阈值（综合分门槛、行业 / 宏观 / 估值门槛）都是基于历史回测分桶分析得出，不是拍脑袋
 - **5 等级信号**：必买 / 买入 / 持有 / 卖出 / 必卖。必买/必卖是综合分极端 + 全门槛通过的稀有信号
+- **长短两套信号并行**：写在 `stocks` 表的不同列上，互不干扰。长期是价值投资（好公司 + 便宜），短期是**反转**（超卖反弹）—— 后者的方向是被回测逼出来的：v200 的追涨模型 IC = -0.114，v201 直接翻转
+- **新维度先观察再转正**：舆情、换手率两个维度权重为 0 但照常计算写库，等前向测试证明与未来收益正相关，再从权重池里给实权重
 - **模拟盘多账户**：每个用户可有多个独立账户，互不干扰，方便分策略试验
 - **数据陈旧降级**：宏观接口（akshare-sina）2025-08 后停更，已切换主源到东方财富 JSON API，akshare 留作 fallback
 - **实时价缓存**：跨用户共享、10 分钟 TTL，工作日交易时段每 8 分钟自动后台预热，用户打开模拟盘秒开

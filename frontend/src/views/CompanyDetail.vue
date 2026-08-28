@@ -11,10 +11,10 @@
             <span class="code">{{ detail.info.code }}</span>
             <span class="name">{{ detail.info.name }}</span>
             <span class="signal-pair">
-              <span class="signal-label">长期</span>
-              <SignalBadge :signal="detail.info.signal" effect="dark" />
-              <span class="signal-label" style="margin-left:10px">短期</span>
-              <SignalBadge v-if="detail.info.short_signal" :signal="detail.info.short_signal" effect="dark" />
+              <span class="signal-label">纪律</span>
+              <WatchTagBadge :watch="{ tag: detail.info.watch_tag, tag_reason: detail.info.watch_tag_reason }" />
+              <el-tag v-if="detail.info.macd_cross_up" type="danger" effect="dark"
+                      size="small" style="margin-left:10px;font-weight:700">⚡ MACD 金叉</el-tag>
               <span v-else style="color:#bbb;font-size:12px">— 数据不足</span>
             </span>
           </div>
@@ -34,19 +34,19 @@
           </div>
         </div>
 
-        <!-- 长期信号理由 -->
+        <!-- EMA20 跟随纪律 -->
         <el-alert
-          v-if="detail.info.signal_reason"
-          :title="'长期：' + detail.info.signal_reason"
-          :type="alertType"
+          v-if="detail.info.watch_tag_reason"
+          :title="'纪律：' + detail.info.watch_tag_reason"
+          :type="watchAlertType"
           show-icon :closable="false"
           class="signal-alert"
         />
-        <!-- 短期信号理由 -->
+        <!-- MACD 零轴上方回踩金叉 -->
         <el-alert
-          v-if="detail.info.short_signal_reason"
-          :title="'短期：' + detail.info.short_signal_reason"
-          :type="shortAlertType"
+          v-if="detail.info.macd_reason"
+          :title="'MACD：' + detail.info.macd_reason"
+          :type="detail.info.macd_cross_up ? 'error' : 'info'"
           show-icon :closable="false"
           class="signal-alert"
         />
@@ -152,7 +152,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { stockApi, watchlistApi, dataApi } from '@/api'
-import SignalBadge from '@/components/SignalBadge.vue'
+import WatchTagBadge from '@/components/WatchTagBadge.vue'
 import ScoreItem from '@/components/ScoreItem.vue'
 import ScoreBar from '@/components/ScoreBar.vue'
 
@@ -171,8 +171,13 @@ function _sigToAlertType(s) {
   if (s === 'STRONG_SELL' || s === 'SELL') return 'error'
   return 'warning'
 }
-const alertType      = computed(() => _sigToAlertType(detail.value?.info?.signal))
-const shortAlertType = computed(() => _sigToAlertType(detail.value?.info?.short_signal))
+// 纪律标签 → el-alert 的配色。止损用 error（最需要一眼看见），可跟进用 success。
+const watchAlertType = computed(() => ({
+  FOLLOW:    'success',
+  HOLD:      'info',
+  STOP_LOSS: 'error',
+  NO_DATA:   'info',
+}[detail.value?.info?.watch_tag] || 'info'))
 
 const sentimentTagType = computed(() => {
   if (!detail.value?.news?.length) return 'info'

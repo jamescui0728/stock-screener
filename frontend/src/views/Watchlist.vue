@@ -19,65 +19,86 @@
               <el-icon><List /></el-icon> 列表
             </el-radio-button>
           </el-radio-group>
-          <el-button size="small" @click="refreshAll" :loading="refreshingAll">
-            <el-icon><Refresh /></el-icon> 更新数据
+          <el-button size="small" @click="refreshQuotes" :loading="quotesLoading">
+            <el-icon><Refresh /></el-icon> 刷新行情
           </el-button>
         </div>
       </div>
 
-      <!-- 汇总信号统计：长期一行 + 短期一行 -->
+      <!-- 汇总：EMA20 跟随纪律 -->
       <div class="signal-section">
-        <div class="signal-row-label">长期信号（基本面 + 估值，hold 6-12 月）</div>
+        <div class="signal-row-label">
+          EMA20 跟随纪律（线上拿住、线下离场；站稳均线且放量才跟进；涨 30% / 70% 分批止盈）
+        </div>
         <div class="signal-stat-grid">
           <el-card class="signal-stat strong-buy-stat">
-            <div class="stat-num">{{ sigCounts.STRONG_BUY }}</div>
-            <div class="stat-lbl">⭐ 必买</div>
+            <div class="stat-num">{{ tagCounts.FOLLOW }}</div>
+            <div class="stat-lbl">🟢 可跟进</div>
           </el-card>
           <el-card class="signal-stat buy-stat">
-            <div class="stat-num">{{ sigCounts.BUY }}</div>
-            <div class="stat-lbl">🟢 买入</div>
+            <div class="stat-num">{{ tagCounts.HOLD }}</div>
+            <div class="stat-lbl">🔵 持有</div>
           </el-card>
           <el-card class="signal-stat hold-stat">
-            <div class="stat-num">{{ sigCounts.HOLD }}</div>
-            <div class="stat-lbl">🟡 持有</div>
+            <div class="stat-num">{{ tagCounts.TAKE_PROFIT }}</div>
+            <div class="stat-lbl">🟡 止盈</div>
           </el-card>
           <el-card class="signal-stat sell-stat">
-            <div class="stat-num">{{ sigCounts.SELL }}</div>
-            <div class="stat-lbl">🔴 卖出</div>
+            <div class="stat-num">{{ tagCounts.STOP_LOSS }}</div>
+            <div class="stat-lbl">🔴 止损</div>
           </el-card>
           <el-card class="signal-stat strong-sell-stat">
-            <div class="stat-num">{{ sigCounts.STRONG_SELL }}</div>
-            <div class="stat-lbl">⚠️ 必卖</div>
+            <div class="stat-num">{{ tagCounts.NO_DATA }}</div>
+            <div class="stat-lbl">⚪ 数据不足</div>
           </el-card>
         </div>
       </div>
 
+      <!-- 汇总：跳空缺口形态 -->
       <div class="signal-section">
-        <div class="signal-row-label">短期信号（动量 + 量价 + 宏观，hold 1-2 周）</div>
+        <div class="signal-row-label">
+          跳空缺口（突破：底部放量跳空 · 加油：上涨途中跳空 · 加仓：回踩缺口上沿守住 · 衰竭：天量长上影）
+        </div>
         <div class="signal-stat-grid">
           <el-card class="signal-stat strong-buy-stat">
-            <div class="stat-num">{{ shortSigCounts.STRONG_BUY }}</div>
-            <div class="stat-lbl">⭐ 必买</div>
+            <div class="stat-num">{{ gapCounts.BREAKOUT }}</div>
+            <div class="stat-lbl">🟢 突破</div>
           </el-card>
           <el-card class="signal-stat buy-stat">
-            <div class="stat-num">{{ shortSigCounts.BUY }}</div>
-            <div class="stat-lbl">🟢 买入</div>
+            <div class="stat-num">{{ gapCounts.RUNAWAY }}</div>
+            <div class="stat-lbl">🔵 加油</div>
           </el-card>
           <el-card class="signal-stat hold-stat">
-            <div class="stat-num">{{ shortSigCounts.HOLD }}</div>
-            <div class="stat-lbl">🟡 持有</div>
+            <div class="stat-num">{{ gapCounts.ADD }}</div>
+            <div class="stat-lbl">🟡 加仓</div>
           </el-card>
           <el-card class="signal-stat sell-stat">
-            <div class="stat-num">{{ shortSigCounts.SELL }}</div>
-            <div class="stat-lbl">🔴 卖出</div>
+            <div class="stat-num">{{ gapCounts.EXHAUST }}</div>
+            <div class="stat-lbl">🔴 衰竭</div>
           </el-card>
           <el-card class="signal-stat strong-sell-stat">
-            <div class="stat-num">{{ shortSigCounts.STRONG_SELL }}</div>
-            <div class="stat-lbl">⚠️ 必卖</div>
+            <div class="stat-num">{{ gapCounts.NONE }}</div>
+            <div class="stat-lbl">⚪ 无形态</div>
           </el-card>
         </div>
-        <div class="signal-row-hint" v-if="shortMissing > 0">
-          ⓘ 还有 {{ shortMissing }} 只无短期信号（价格数据不足或未刷新），点"更新数据"或后台触发短期信号刷新
+        <div class="signal-row-hint" v-if="macdHits > 0">
+          ⚡ 另有 {{ macdHits }} 只命中 MACD 零轴上方回踩金叉
+        </div>
+
+        <div class="signal-row-hint stale-warn" v-if="klineStaleDays > 7">
+          ⚠️ K 线数据截至 <b>{{ klineDate }}</b>，已陈旧 {{ klineStaleDays }} 天。
+          EMA20 与纪律标签算的是那天的位置，<b>不是今天的</b>；上方成交价则是实时的，两者时点不一致。
+          请到数据管理页跑 <code>update-prices?mode=incremental</code> 补齐后再依此操作。
+        </div>
+        <div class="signal-row-hint" v-if="tagCounts.NO_DATA > 0">
+          ⓘ {{ tagCounts.NO_DATA }} 只 K 线不足 20 根，算不出 EMA20。补历史行情：数据管理页跑
+          <code>update-prices?mode=init-missing</code>
+        </div>
+        <div class="signal-row-hint" v-if="quotesLoading">
+          ⏳ 正在拉取最新成交价（首次约 20-30 秒）…标签与 EMA20 已可用
+        </div>
+        <div class="signal-row-hint" v-else-if="quotesMissing > 0">
+          ⓘ {{ quotesMissing }} 只暂无最新成交价，点右上角「刷新行情」拉取
         </div>
       </div>
 
@@ -149,7 +170,7 @@
         <el-card
           v-for="s in stocks" :key="s.code"
           class="stock-card"
-          :class="'card-' + (s.signal || 'NONE').toLowerCase()"
+          :class="'card-tag-' + (s.watch?.tag || 'NO_DATA').toLowerCase()"
         >
           <div class="card-top">
             <div class="card-title" @click="$router.push(`/stocks/${s.code}`)">
@@ -157,14 +178,39 @@
               <span class="name">{{ s.name }}</span>
             </div>
             <div class="card-actions">
-              <div class="signal-pair-card">
-                <SignalBadge :signal="s.signal" />
-                <SignalBadge v-if="s.short_signal" :signal="s.short_signal" />
-              </div>
+              <GapBadge v-if="s.gap_signal" :signal="s.gap_signal"
+                        :days-since="s.gap_days_since" :confirm-date="s.gap_confirm_date" :reason="s.gap_reason"
+                        :lower="s.gap_lower" :upper="s.gap_upper" />
+              <WatchTagBadge :watch="s.watch" />
               <el-button
                 size="small" type="danger" text circle
                 @click="remove(s.code)" title="移除自选"
               ><el-icon><Delete /></el-icon></el-button>
+            </div>
+          </div>
+
+          <!-- 最新成交价 + EMA20 对照 -->
+          <div class="quote-row">
+            <div class="quote-main">
+              <span v-if="s.watch?.raw_price != null" class="quote-price">
+                {{ s.watch.raw_price.toFixed(2) }}
+              </span>
+              <el-skeleton v-else-if="quotesLoading" animated :rows="0" class="quote-skeleton">
+                <template #template><el-skeleton-item variant="text" style="width:56px" /></template>
+              </el-skeleton>
+              <span v-else class="quote-price no-data">—</span>
+              <span
+                v-if="s.watch?.gain_pct != null"
+                class="quote-gain"
+                :class="s.watch.gain_pct >= 0 ? 'gain-pos' : 'gain-neg'"
+              >{{ s.watch.gain_pct >= 0 ? '+' : '' }}{{ s.watch.gain_pct.toFixed(1) }}%</span>
+            </div>
+            <div class="quote-ema" v-if="s.watch?.above_ema_pct != null">
+              距 EMA20
+              <span :class="s.watch.above_ema ? 'ema-above' : 'ema-below'">
+                {{ s.watch.above_ema ? '▲' : '▼' }}
+                {{ s.watch.above_ema_pct >= 0 ? '+' : '' }}{{ s.watch.above_ema_pct.toFixed(1) }}%
+              </span>
             </div>
           </div>
 
@@ -183,15 +229,12 @@
             </div>
           </div>
 
-          <p class="reason" v-if="s.signal_reason">{{ s.signal_reason }}</p>
+          <p class="reason" v-if="s.watch?.tag_reason">{{ s.watch.tag_reason }}</p>
           <div class="card-footer">
             <span class="update-time">
-              {{ s.signal_updated ? '更新于 ' + s.signal_updated.slice(0, 16) : '未评估' }}
+              {{ s.watch?.raw_price_date ? '行情 ' + s.watch.raw_price_date : '行情未获取' }}
+              <template v-if="s.watch?.trade_date"> · K线 {{ s.watch.trade_date }}</template>
             </span>
-            <el-button
-              size="small" text type="primary"
-              @click="refreshOne(s.code)" :loading="refreshingCode === s.code"
-            >重新评估</el-button>
           </div>
         </el-card>
       </div>
@@ -207,27 +250,54 @@
         >
           <el-table-column prop="code" label="代码" width="90" fixed />
           <el-table-column prop="name" label="名称" width="100" fixed />
-          <el-table-column label="长期" width="90" sortable prop="signal">
+          <el-table-column label="纪律" width="110" sortable prop="watch.tag">
             <template #default="{ row }">
-              <SignalBadge :signal="row.signal" />
+              <WatchTagBadge :watch="row.watch" />
             </template>
           </el-table-column>
-          <el-table-column label="短期" width="90" sortable prop="short_signal">
+          <el-table-column label="缺口" width="110" sortable prop="gap_signal">
             <template #default="{ row }">
-              <SignalBadge v-if="row.short_signal" :signal="row.short_signal" />
+              <GapBadge :signal="row.gap_signal" :days-since="row.gap_days_since" :confirm-date="row.gap_confirm_date"
+                        :reason="row.gap_reason" :lower="row.gap_lower" :upper="row.gap_upper" />
+            </template>
+          </el-table-column>
+          <el-table-column label="最新价" width="110" sortable prop="watch.raw_price">
+            <template #default="{ row }">
+              <span v-if="row.watch?.raw_price != null" class="quote-price-cell">
+                {{ row.watch.raw_price.toFixed(2) }}
+              </span>
+              <span v-else-if="quotesLoading" class="no-data">…</span>
+              <span v-else class="no-data">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="距 EMA20" width="120" sortable prop="watch.above_ema_pct">
+            <template #default="{ row }">
+              <el-tooltip
+                v-if="row.watch?.above_ema_pct != null"
+                :content="emaTooltip(row.watch)"
+                placement="top" :show-after="200"
+              >
+                <span class="ema-cell"
+                      :class="row.watch.above_ema ? 'ema-above' : 'ema-below'">
+                  {{ row.watch.above_ema ? '▲' : '▼' }}
+                  {{ row.watch.above_ema_pct >= 0 ? '+' : '' }}{{ row.watch.above_ema_pct.toFixed(1) }}%
+                </span>
+              </el-tooltip>
+              <span v-else class="no-data">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="较成本" width="100" sortable prop="watch.gain_pct">
+            <template #default="{ row }">
+              <span v-if="row.watch?.gain_pct != null"
+                    :class="row.watch.gain_pct >= 0 ? 'gain-pos' : 'gain-neg'">
+                {{ row.watch.gain_pct >= 0 ? '+' : '' }}{{ row.watch.gain_pct.toFixed(1) }}%
+              </span>
               <span v-else class="no-data">—</span>
             </template>
           </el-table-column>
           <el-table-column label="综合评分" width="140" sortable prop="composite_score">
             <template #default="{ row }">
               <ScoreBar :score="row.composite_score" :max="100" />
-            </template>
-          </el-table-column>
-          <el-table-column label="短期评分" width="120" sortable prop="short_composite_score">
-            <template #default="{ row }">
-              <ScoreBar v-if="row.short_composite_score != null"
-                        :score="row.short_composite_score" :max="100" color="#9c27b0" />
-              <span v-else class="no-data">—</span>
             </template>
           </el-table-column>
           <el-table-column label="基本面" width="130" sortable prop="fundamental_score">
@@ -255,16 +325,13 @@
               <ScoreBar :score="row.score_valuation" :max="20" color="#f56c6c" />
             </template>
           </el-table-column>
-          <el-table-column label="信号理由" min-width="240" prop="signal_reason">
+          <el-table-column label="纪律依据" min-width="260" prop="watch.tag_reason">
             <template #default="{ row }">
-              <span class="table-reason">{{ row.signal_reason || '-' }}</span>
+              <span class="table-reason">{{ row.watch?.tag_reason || '-' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="80" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" text type="primary"
-                @click.stop="refreshOne(row.code)" :loading="refreshingCode === row.code"
-              >评估</el-button>
               <el-button size="small" text type="danger"
                 @click.stop="remove(row.code)"
               >移除</el-button>
@@ -280,41 +347,112 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Bell } from '@element-plus/icons-vue'
-import { watchlistApi, stockApi } from '@/api'
+import { watchlistApi } from '@/api'
 import ScoreBar from '@/components/ScoreBar.vue'
-import SignalBadge from '@/components/SignalBadge.vue'
+import WatchTagBadge from '@/components/WatchTagBadge.vue'
+import GapBadge from '@/components/GapBadge.vue'
 
-const loading        = ref(false)
-const refreshingCode = ref('')
-const refreshingAll  = ref(false)
-const stocks         = ref([])
-const viewMode       = ref('card')   // 'card' | 'table'
+const loading       = ref(false)
+const quotesLoading = ref(false)
+const stocks        = ref([])
+const viewMode      = ref('card')   // 'card' | 'table'
 
-const sigCounts = computed(() => {
-  const c = { STRONG_BUY: 0, BUY: 0, HOLD: 0, SELL: 0, STRONG_SELL: 0 }
+// EMA20 跟随纪律的分布（取代原来的长期 / 短期买卖信号统计）
+const tagCounts = computed(() => {
+  const c = { FOLLOW: 0, HOLD: 0, TAKE_PROFIT: 0, STOP_LOSS: 0, NO_DATA: 0 }
   for (const s of stocks.value) {
-    if (s.signal && c[s.signal] !== undefined) c[s.signal]++
+    const t = s.watch?.tag
+    if (t && c[t] !== undefined) c[t]++
+    else c.NO_DATA++
   }
   return c
 })
 
-const shortSigCounts = computed(() => {
-  const c = { STRONG_BUY: 0, BUY: 0, HOLD: 0, SELL: 0, STRONG_SELL: 0 }
+// 跳空缺口形态的分布。gap_signal 来自全市场扫描落库（stocks 表），
+// 与纪律标签相互独立 —— 一只票可以同时有纪律标签和缺口形态。
+const gapCounts = computed(() => {
+  const c = { BREAKOUT: 0, RUNAWAY: 0, ADD: 0, EXHAUST: 0, NONE: 0 }
   for (const s of stocks.value) {
-    if (s.short_signal && c[s.short_signal] !== undefined) c[s.short_signal]++
+    const g = s.gap_signal
+    if (g && c[g] !== undefined) c[g]++
+    else c.NONE++
   }
   return c
 })
 
-// 没有短期信号的股票数（价格数据不足或未刷新）
-const shortMissing = computed(() =>
-  stocks.value.filter(s => !s.short_signal).length
+const macdHits = computed(() =>
+  stocks.value.filter(s => s.macd_cross_up).length
 )
 
-async function load() {
+// 还没拿到最新成交价的只数
+const quotesMissing = computed(() =>
+  stocks.value.filter(s => s.watch?.raw_price == null).length
+)
+
+// K 线截止日（取最新的一只）。EMA20 基于它算，成交价却是实时的 ——
+// 两者时点差太远时必须提醒，否则会照着几个月前的均线位置做今天的决定。
+const klineDate = computed(() => {
+  const ds = stocks.value.map(s => s.watch?.trade_date).filter(Boolean)
+  return ds.length ? ds.sort().at(-1) : null
+})
+
+const klineStaleDays = computed(() => {
+  if (!klineDate.value) return 0
+  const diff = Date.now() - new Date(klineDate.value + 'T00:00:00').getTime()
+  return Math.max(0, Math.floor(diff / 86400000))
+})
+
+/**
+ * 两步加载：
+ *   第一步 refresh_price=false —— 只读缓存，秒回，标签 / EMA20 / 评分立即可用
+ *   第二步 refresh_price=true  —— 后台现拉 sina 不复权实时价（冷缓存约 26 秒），
+ *                                 回来后把成交价与止盈涨幅补上
+ * 之所以不合成一次请求：自选股是高频打开的列表页，不能每次开都转 26 秒圈。
+ */
+async function load({ withQuotes = true } = {}) {
   loading.value = true
-  try { stocks.value = await watchlistApi.get() }
-  finally { loading.value = false }
+  try {
+    stocks.value = await watchlistApi.get(false)
+  } finally {
+    loading.value = false
+  }
+  if (withQuotes && quotesMissing.value > 0) fetchQuotes()
+}
+
+async function fetchQuotes() {
+  if (quotesLoading.value) return
+  quotesLoading.value = true
+  try {
+    stocks.value = await watchlistApi.get(true)
+  } catch {
+    // 拉行情失败不影响已经显示出来的标签，静默降级即可
+  } finally {
+    quotesLoading.value = false
+  }
+}
+
+async function refreshQuotes() {
+  await fetchQuotes()
+  if (quotesMissing.value > 0) {
+    ElMessage.warning(`仍有 ${quotesMissing.value} 只未取到行情，可稍后再试`)
+  } else {
+    ElMessage.success('行情已更新')
+  }
+}
+
+/**
+ * 距均线格子的悬浮说明。
+ * price_basis='qfq' 时 close/ema20 已换算成前复权，与页面上的成交价同口径，可以直接显示；
+ * ='hfq' 时换算不成立（没拿到实时价，或 K 线与实时价不同日），此时那两个数是后复权值，
+ * 显示出来会和成交价差好几个数量级，所以只说百分比。
+ */
+function emaTooltip(w) {
+  if (!w) return ''
+  const when = w.trade_date ? `（K线截至 ${w.trade_date}）` : ''
+  if (w.price_basis === 'qfq') {
+    return `前复权收盘 ${w.close} / EMA20 ${w.ema20}${when}`
+  }
+  return `暂无实时价，无法换算前复权，仅显示相对位置${when}`
 }
 
 async function remove(code) {
@@ -322,32 +460,6 @@ async function remove(code) {
   await watchlistApi.remove(code)
   stocks.value = stocks.value.filter(s => s.code !== code)
   ElMessage.success('已移除')
-}
-
-async function refreshOne(code) {
-  refreshingCode.value = code
-  try {
-    await stockApi.refreshSignal(code)
-    await load()
-    ElMessage.success('信号已更新')
-  } finally {
-    refreshingCode.value = ''
-  }
-}
-
-async function refreshAll() {
-  refreshingAll.value = true
-  try {
-    for (const s of stocks.value) {
-      refreshingCode.value = s.code
-      try { await stockApi.refreshSignal(s.code) } catch {}
-    }
-    await load()
-    ElMessage.success('所有自选股已更新')
-  } finally {
-    refreshingAll.value = false
-    refreshingCode.value = ''
-  }
 }
 
 // ── 最新消息 ──
@@ -476,9 +588,33 @@ onMounted(async () => {
 
 .stock-card { transition: box-shadow .2s; }
 .stock-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12); }
-.card-buy  { border-left: 4px solid #67c23a; }
-.card-hold { border-left: 4px solid #e6a23c; }
-.card-sell { border-left: 4px solid #f56c6c; }
+/* 卡片左边框按 EMA20 纪律标签着色，与 WatchTagBadge 的配色保持一致 */
+.card-tag-follow      { border-left: 4px solid #67c23a; }
+.card-tag-hold        { border-left: 4px solid #409eff; }
+.card-tag-take_profit { border-left: 4px solid #e6a23c; }
+.card-tag-stop_loss   { border-left: 4px solid #f56c6c; }
+.card-tag-no_data     { border-left: 4px solid #dcdfe6; }
+
+/* 最新成交价 */
+.quote-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 8px 0 10px;
+}
+.quote-main { display: flex; align-items: baseline; gap: 8px; }
+.quote-price {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1f2328;
+  font-variant-numeric: tabular-nums;
+}
+.quote-price.no-data { color: #ccc; font-size: 18px; }
+.quote-skeleton { display: inline-block; width: 56px; }
+.quote-gain { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.quote-ema { font-size: 12px; color: #999; }
+.quote-ema span { font-weight: 600; margin-left: 2px; }
+.quote-price-cell { font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .card-top    { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .card-title  { display: flex; align-items: center; gap: 8px; cursor: pointer; }
@@ -488,6 +624,34 @@ onMounted(async () => {
 .card-actions { display: flex; align-items: center; gap: 6px; }
 .signal-pair-card { display: inline-flex; gap: 4px; }
 .no-data { color: #bbb; font-size: 13px; }
+
+/* 距 EMA20 百分比（不显示后复权原值，量级与成交价对不上会误导） */
+.ema-cell {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.ema-above { color: #67c23a; }
+.ema-below { color: #f56c6c; }
+
+.stale-warn {
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: #b88230;
+  line-height: 1.6;
+}
+.stale-warn code {
+  background: #fff;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.gain-pos { color: #f56c6c; font-weight: 600; font-variant-numeric: tabular-nums; }
+.gain-neg { color: #67c23a; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .score-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .score-col { display: flex; align-items: center; gap: 6px; }

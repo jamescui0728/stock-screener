@@ -52,31 +52,58 @@ curl -X POST http://localhost:8000/api/auth/login \
 GET /api/stocks
   ?keyword=招商银行              # 模糊搜索（代码 / 名称，支持空格容忍）
   &industry_code=BK0475         # 行业代码精确过滤
-  &signal=BUY                   # 单一信号精确匹配
-  &signal_group=buy             # 聚合：buy=BUY+STRONG_BUY, sell=SELL+STRONG_SELL
+  &signal=BUY                   # 长期信号，单一等级精确匹配（大小写不敏感）
+  &signal_group=buy             # 长期聚合：buy=BUY+STRONG_BUY, sell=SELL+STRONG_SELL
+  &short_signal=BUY             # 短期信号，语义同 signal
+  &short_signal_group=buy       # 短期聚合：buy / sell / watch
   &min_fundamental=60           # 基本面最低分
   &min_composite=70             # 综合分最低
   &page=1&limit=50              # 分页（limit ≤ 200）
 ```
 
-> `signal` 和 `signal_group` 同时传时 `signal_group` 优先级更高。
+**优先级与组合规则：**
+
+- `signal` 和 `signal_group` 同时传时 `signal_group` 优先（`signal` 被忽略），短期同理
+- **长期过滤与短期过滤是 AND 关系**，可以同时生效（例如「长期 BUY 且短期 BUY」）
+- `signal_group` / `short_signal_group` 传了 `buy` / `sell` / `watch` 之外的值 → **400**
+
+**排序会跟着切换**：只要传了 `short_signal` 或 `short_signal_group`，结果按
+`short_composite_score` 降序；否则按 `composite_score` 降序（两者都是 nulls last）。
+
+**`watch` 观察候选桶**：捞出「composite 够 BUY 线、但被大盘趋势门槛降级成 HOLD」的高分票，
+避免这些机会在前端消失。`watch` / `candidate` / `trend_blocked` 三个值等价：
+
+```
+GET /api/stocks?short_signal_group=watch
+→ short_signal == "HOLD"
+  且 short_composite_score >= SHORT_BUY_THRESHOLD
+  且 reason 含 "市场短线趋势未达反转买入门槛"
+```
 
 ### 单只详情
 ```
 GET /api/stocks/{code}
 ```
-返回完整字段：基本面子分、估值百分位、信号 reason、行业上下文、近 30 条新闻摘要等。
+返回 4 块：`info`（同列表项，含长/短期信号与 reason、行业上下文）、
+`financials`（最近 10 期财报）、`prices`（最近 252 个交易日 K 线）、`news`（最近 20 条）。
+股票不存在 → **404**。
 
 ### 强制刷新单只信号
+
 ```
-POST /api/stocks/{code}/signal
+POST /api/stocks/{code}/signal          # 长期信号；数据不足 → 422
+POST /api/stocks/{code}/short-signal    # 短期信号；价格 < 21 个交易日 → 422
 ```
 
-### 刷新所有 5196 只信号
+### 批量刷新信号
+
 ```
-POST /api/signals/refresh-all
+POST /api/signals/refresh-all      # 长期，全市场，约 80 秒
+POST /api/signals/refresh-short    # 短期，全市场，约 1-2 分钟
 ```
-约 80 秒（纯 DB 计算，不打外部 API）。
+
+两个都是**后台异步**：立刻返回 `{"message": "..."}`，实际进度通过 `data.task_tracker`
+记录。纯 DB 计算，不打外部 API。
 
 ---
 
@@ -84,7 +111,7 @@ POST /api/signals/refresh-all
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET  | `/industries?min_score=0` | 列出 216 个一级行业（按总分排序） |
+| GET  | `/industries?min_score=0` | 列出东财行业板块（按总分排序，未评分的排在最后） |
 | POST | `/industries/{code}/score` | 重算单个行业评分 |
 | POST | `/industries/rescore-all` | 重算全部行业（约 30 秒） |
 
@@ -154,6 +181,22 @@ GET /paper/rules
 GET /paper/quote/{code}
 → { "code", "name", "signal", "composite_score", "close", "trade_date" }
 ```
+
+### 5.6 自动跟单（v202g）
+
+系统级账户（`user_id IS NULL`），跟着短期信号自动买卖。机制见
+[ARCHITECTURE.md §3.4](ARCHITECTURE.md)。
+
+| 方法 | 路径 | 权限 | 用途 |
+|---|---|---|---|
+| GET  | `/paper/auto-follow/performance` | 需登录 | 绩效快照（NAV / 胜率 / 持仓） |
+| GET  | `/paper/auto-follow/transactions?limit=500` | 需登录 | 逐笔流水（只返回带 `v202g-auto` 标签的） |
+| POST | `/paper/auto-follow/run` | **仅管理员** | 手动触发一次（凌晨 cron 之外的补救入口） |
+
+- `transactions` 的 `limit` 服务端强制夹在 **1-1000**（防超大查询拉爆内存），默认 500
+- 账户尚未建立时 `transactions` 返回 `[]`，**不会**顺手把账户建出来
+- `run` 带非阻塞运行级锁：已在跑时返回 `{"skipped_reason": "already_running", ...}`
+  而不是报错，也不会重复买入
 
 ---
 

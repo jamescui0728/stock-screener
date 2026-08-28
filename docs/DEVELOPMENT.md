@@ -32,11 +32,16 @@ cd backend && nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --log-
 ### 命名
 
 - Python：`snake_case`，私有用 `_leading_underscore`
-- 数据库表：`snake_case` 复数（`paper_accounts`）
+- 数据库表：`snake_case`，**单复数不统一**（历史遗留，见下）
 - ORM 类：`PascalCase` 单数（`PaperAccount`）
 - API 路径：kebab-case（`/data/update-prices`），参数 `snake_case`
 - Vue 组件：`PascalCase.vue`
 - Vue ref/computed：`camelCase`
+
+> ⚠️ **表名单复数不一致，写 SQL 前先 `.tables` 确认**。多数表是复数
+> （`stocks` / `industries` / `users` / `paper_positions` / `paper_transactions`），
+> 但有两张是单数：**`paper_account`**（不是 `paper_accounts`）和 **`watchlist`**。
+> 新表建议用复数，但**不要**为了统一去改这两张已有的表 —— 那需要迁移脚本 + 全量改引用。
 
 ### 注释
 
@@ -218,7 +223,7 @@ for r in db.execute(text('SELECT signal, COUNT(*) FROM stocks GROUP BY signal'))
 ```bash
 sqlite3 backend/stock_screener.db
 sqlite> .tables
-sqlite> SELECT * FROM paper_accounts;
+sqlite> SELECT * FROM paper_account;    -- 注意：单数，不是 paper_accounts
 sqlite> .quit
 ```
 
@@ -262,18 +267,59 @@ curl http://localhost:8000/api/backtest/runs/{id}
 
 ## 测试
 
-**项目目前 0 自动化测试**。
+用标准库 `unittest`（**没有引入 pytest**，仓库里也没有 pytest 配置）。测试跑在内存
+SQLite 上（`create_engine("sqlite:///:memory:")` + `Base.metadata.create_all`），
+不碰真实的 `stock_screener.db`，也不打外部网络。
 
-每次修改信号引擎 / 评分逻辑 / 阈值，建议：
-1. 跑一次 `/backtest/run` 看胜率不退化
-2. `POST /signals/refresh-all` 看信号分布是否合理（必买/必卖不应突然占比剧增/暴减）
-3. 手动开页面冒烟测试（公司筛选、自选股、模拟盘买卖）
+### 怎么跑
 
-未来如果加测试，建议优先：
-- `engines/signal_engine.py:generate_signal` 的 11 个分支（必买/买入/各种 HOLD 降级/卖出/必卖/veto）
+```bash
+cd backend
+python -m unittest tests.test_short_signal_risk tests.test_price_position -v
+```
+
+单跑一个文件 / 一个用例：
+
+```bash
+python -m unittest tests.test_short_signal_risk -v
+python -m unittest tests.test_short_signal_risk.TestClassifyShortSignal -v
+```
+
+### 现有覆盖
+
+| 文件 | 覆盖内容 |
+|---|---|
+| `tests/test_short_signal_risk.py` | `classify_short_signal` 各分支、5 日急跌 veto、大盘趋势 fail-closed、`score_news_heat`、`compute_industry_news_heat`、截面排名 |
+| `tests/test_price_position.py` | `compute_price_pctile_life`（上市以来总收益分位） |
+
+### CI 跑什么
+
+`.github/workflows/ci.yml` 三个 job（push/PR 到 main 触发）：
+
+1. **backend-syntax** — `py_compile` 全部 .py（跳过 `scripts/`）→ 跑
+   `tests.test_short_signal_risk` → import 一遍 17 个顶层模块
+2. **frontend-build** — `npm ci` + `npm run build`
+3. **docker-build** — 前后端镜像构建（不 push）+ `docker compose config` 校验
+
+> ⚠️ **CI 目前只跑 `test_short_signal_risk` 一个测试文件**，
+> `test_price_position` 没有被纳入 —— 改坏了 CI 不会变红，本地要自己跑。
+
+### 仍然是 0 覆盖的地方
+
+改到这些区域时，自动化测试帮不了你，得靠下面的手工验证：
+
+- `engines/signal_engine.py:generate_signal` 的各分支（必买/买入/各种 HOLD 降级/卖出/必卖/veto）
 - `engines/paper_trade.py` 的 buy/sell 流程（费用计算、加权平均成本、清仓边界）
+- `engines/auto_follow.py` 的跟单买卖与跳过保护
 - `data/fetcher.py:_retry` 的超时 + 重试行为
-- `engines/company_scorer.py` 的 ROE/利润增长各子分边界
+- `engines/company_scorer.py` 的 ROE / 利润增长各子分边界
+
+### 改了信号引擎 / 评分逻辑 / 阈值之后
+
+1. 跑一次 `/backtest/run` 看胜率不退化
+2. `POST /signals/refresh-all`（长期）或 `POST /signals/refresh-short`（短期），
+   看信号分布是否合理（必买/必卖不应突然占比剧增/暴减）
+3. 手动开页面冒烟测试（公司筛选、自选股、模拟盘买卖）
 
 ---
 

@@ -308,10 +308,11 @@ def account_snapshot(db: Session, account_id: int) -> dict:
             "cost_value":           round(cv, 2),
             "unrealized_pnl":       round(mv - cv, 2),
             "pnl_pct":              round((mv / cv - 1) * 100, 2) if cv else 0.0,
-            "signal":               stock.signal if stock else None,
             "composite_score":      stock.composite_score if stock else None,
-            "short_signal":         stock.short_signal if stock else None,
-            "short_composite_score": stock.short_composite_score if stock else None,
+            # 买卖信号已停用，持仓表改看 EMA20 跟随纪律 + MACD 关注
+            "watch_tag":            stock.watch_tag if stock else None,
+            "watch_tag_reason":     stock.watch_tag_reason if stock else None,
+            "macd_cross_up":        bool(stock.macd_cross_up) if stock else False,
             "opened_at":            str(p.opened_at),
         })
 

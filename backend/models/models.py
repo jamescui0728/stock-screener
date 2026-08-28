@@ -102,6 +102,27 @@ class Stock(Base):
     short_score_turnover          = Column(Float, nullable=True)   # 换手率（观察模式，weight=0）
     price_pctile_life = Column(Float, nullable=True)   # 上市以来总收益分位 0-1（最新后复权收盘<含分红>在全历史中的位置，非市价分位）
 
+    # ── EMA20 跟随纪律 + MACD 买入关注（全市场扫描，engines/watch_tag.py + engines/macd.py）──
+    # 与上面两套买卖信号无关，是独立的第三套规则。全市场版只有
+    # FOLLOW / HOLD / STOP_LOSS / NO_DATA 四种（止盈档要成本价，只在自选股页面出）。
+    watch_tag         = Column(String(15), nullable=True, index=True)
+    watch_tag_reason  = Column(Text, nullable=True)
+    watch_above_ema_pct = Column(Float, nullable=True)   # 距 EMA20 百分比（比值，与复权口径无关）
+    watch_kline_date  = Column(Date, nullable=True)      # 判定所用 K 线的截止日，用于提示数据陈旧
+    macd_dif          = Column(Float, nullable=True)
+    macd_dea          = Column(Float, nullable=True)
+    macd_hist         = Column(Float, nullable=True)
+    macd_cross_up     = Column(Boolean, default=False, index=True)  # 零轴上方回踩金叉（仅当日为真）
+    macd_reason       = Column(Text, nullable=True)
+    # 跳空缺口信号（engines/gap.py）：突破 / 加油 / 衰竭 / 加仓
+    gap_signal        = Column(String(15), nullable=True, index=True)
+    gap_days_since    = Column(Integer, nullable=True)   # 距确认日几个交易日（相对末根K线，非今天）
+    gap_confirm_date  = Column(Date, nullable=True)      # 信号确认的真实日期（展示用这个，别用天数）
+    gap_lower         = Column(Float, nullable=True)     # 缺口下沿 H_prev
+    gap_upper         = Column(Float, nullable=True)     # 缺口上沿 L_today
+    gap_reason        = Column(Text, nullable=True)
+    watch_updated     = Column(DateTime, nullable=True)
+
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     industry     = relationship("Industry", back_populates="stocks")
