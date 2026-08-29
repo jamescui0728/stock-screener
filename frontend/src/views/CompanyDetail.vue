@@ -13,20 +13,23 @@
             <span class="signal-pair">
               <span class="signal-label">纪律</span>
               <WatchTagBadge :watch="{ tag: detail.info.watch_tag, tag_reason: detail.info.watch_tag_reason }" />
+              <!-- 金叉只在触发当日为真，"没金叉"是常态而非异常。
+                   只有真的算不出 MACD（K 线不足 34 根）时才提示数据不足；
+                   有数据但今日未金叉时不占位，具体原因见下方 MACD 提示条。 -->
               <el-tag v-if="detail.info.macd_cross_up" type="danger" effect="dark"
                       size="small" style="margin-left:10px;font-weight:700">⚡ MACD 金叉</el-tag>
-              <span v-else style="color:#bbb;font-size:12px">— 数据不足</span>
+              <span v-else-if="detail.info.macd_dif == null"
+                    style="color:#bbb;font-size:12px;margin-left:10px">— MACD 数据不足</span>
             </span>
           </div>
           <div class="header-actions">
             <el-button size="small" @click="addWatch">
               <el-icon><Star /></el-icon> 加自选
             </el-button>
-            <el-button size="small" type="primary" @click="refreshSignal" :loading="refreshing">
-              重新评估
-            </el-button>
-            <el-button size="small" @click="refreshShortSignal" :loading="refreshingShort">
-              重算短期
+            <!-- 原「重新评估」/「重算短期」调的是已停用的长/短期信号接口，
+                 刷完页面上可见的纪律 / MACD 标签纹丝不动。换成真正驱动这些标签的重算。 -->
+            <el-button size="small" type="primary" @click="refreshWatch" :loading="refreshingWatch">
+              重算纪律 / MACD
             </el-button>
             <el-button size="small" @click="updateNews" :loading="updatingNews">
               更新舆情
@@ -159,8 +162,7 @@ import ScoreBar from '@/components/ScoreBar.vue'
 const route       = useRoute()
 const router      = useRouter()
 const loading         = ref(false)
-const refreshing      = ref(false)
-const refreshingShort = ref(false)
+const refreshingWatch = ref(false)
 const updatingNews    = ref(false)
 const detail          = ref(null)
 const chartMode       = ref('profit')
@@ -310,27 +312,20 @@ async function load() {
   }
 }
 
-async function refreshSignal() {
-  refreshing.value = true
+/**
+ * 重算纪律标签 / MACD / 缺口信号。
+ *
+ * 后端没有"只算一只"的入口 —— 缺口和纪律都依赖全市场一次性拉价格再批量算，
+ * 单只重算反而要多打一次库。全市场实测约 5 秒，可以接受，所以这里直接走全量。
+ */
+async function refreshWatch() {
+  refreshingWatch.value = true
   try {
-    await stockApi.refreshSignal(route.params.code)
+    await stockApi.refreshWatchTags()
     await load()
-    ElMessage.success('长期信号已更新')
+    ElMessage.success('纪律 / MACD / 缺口信号已重算')
   } finally {
-    refreshing.value = false
-  }
-}
-
-async function refreshShortSignal() {
-  refreshingShort.value = true
-  try {
-    await stockApi.refreshShortSignal(route.params.code)
-    await load()
-    ElMessage.success('短期信号已更新')
-  } catch (e) {
-    ElMessage.error('刷新短期信号失败：' + (e.response?.data?.detail || e.message))
-  } finally {
-    refreshingShort.value = false
+    refreshingWatch.value = false
   }
 }
 
