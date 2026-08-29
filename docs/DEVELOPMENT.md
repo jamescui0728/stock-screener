@@ -275,7 +275,7 @@ SQLite 上（`create_engine("sqlite:///:memory:")` + `Base.metadata.create_all`�
 
 ```bash
 cd backend
-python -m unittest tests.test_short_signal_risk tests.test_price_position -v
+python -m unittest discover -s tests -v      # 全部 164 条
 ```
 
 单跑一个文件 / 一个用例：
@@ -287,10 +287,13 @@ python -m unittest tests.test_short_signal_risk.TestClassifyShortSignal -v
 
 ### 现有覆盖
 
-| 文件 | 覆盖内容 |
-|---|---|
-| `tests/test_short_signal_risk.py` | `classify_short_signal` 各分支、5 日急跌 veto、大盘趋势 fail-closed、`score_news_heat`、`compute_industry_news_heat`、截面排名 |
-| `tests/test_price_position.py` | `compute_price_pctile_life`（上市以来总收益分位） |
+| 文件 | 条数 | 覆盖内容 |
+|---|---|---|
+| `tests/test_short_signal_risk.py` | 40 | `classify_short_signal` 各分支、5 日急跌 veto、大盘趋势 fail-closed、`score_news_heat`、`compute_industry_news_heat`、截面排名 |
+| `tests/test_price_position.py` | 4 | `compute_price_pctile_life`（上市以来总收益分位） |
+| `tests/test_watch_tag.py` | 49 | EMA20 / 量比数值、四档标签判定与优先级、前复权换算与同日守卫、成本价读取 |
+| `tests/test_macd.py` | 27 | MACD(12/26/9) 数值、零轴上方回踩金叉四个必要条件、零轴下方金叉排除 |
+| `tests/test_gap.py` | 44 | 跳空识别、突破/加油/衰竭/加仓四态、缺口回补判定、信号有效期 |
 
 ### CI 跑什么
 
@@ -301,8 +304,13 @@ python -m unittest tests.test_short_signal_risk.TestClassifyShortSignal -v
 2. **frontend-build** — `npm ci` + `npm run build`
 3. **docker-build** — 前后端镜像构建（不 push）+ `docker compose config` 校验
 
-> ⚠️ **CI 目前只跑 `test_short_signal_risk` 一个测试文件**，
-> `test_price_position` 没有被纳入 —— 改坏了 CI 不会变红，本地要自己跑。
+> ⚠️ **CI 只跑 `test_short_signal_risk` 一个文件**，另外 4 个文件（124 条）都没纳入：
+> `test_price_position` / `test_watch_tag` / `test_macd` / `test_gap`。
+> 这是**有意的选择**，不是遗漏 —— 改坏了 CI 不会变红，改动这些模块后**必须本地自己跑**：
+>
+> ```bash
+> cd backend && python -m unittest discover -s tests -v
+> ```
 
 ### 仍然是 0 覆盖的地方
 
