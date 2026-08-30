@@ -392,7 +392,14 @@ def fetch_all_price_data(db: Session, limit: int = 0, mode: str = "incremental")
       "init-missing"
         - 只针对完全没价格数据的股票做首次全量；已有数据的 skip
         - 适合 incremental 之后单独补一次新股的历史
+      "snapshot"
+        - 一次请求补齐"恰好落后一个交易日"的股票的最新一根 K 线
+        - 几秒完成，且绕开 _retry worker 池卡死（见 fetch_latest_bars_snapshot）
+        - 补不了历史空洞，只补最新一根
     """
+    if mode == "snapshot":
+        return fetch_latest_bars_snapshot(db)
+
     from data.fetch_progress import get_fetch_progress
     from datetime import timedelta
     from sqlalchemy import func
@@ -500,6 +507,225 @@ def fetch_turnover_today(db: Session, target_date: Optional[date] = None) -> dic
     db.commit()
     logger.info(f"换手率快照({target_date})：更新 {updated} 行（覆盖率 {updated}/{len(turnover_map)}）")
     return {"updated": updated, "skipped": len(turnover_map) - updated}
+
+
+def _recent_trading_dates(db: Session, n: int = 15) -> list:
+    """从库里已有数据反推最近的交易日序列（升序）。项目没有交易日历表，
+    但 price_data 的 distinct trade_date 本身就是一份事实交易日历。"""
+    from sqlalchemy import distinct
+    rows = (
+        db.query(distinct(PriceData.trade_date))
+        .order_by(PriceData.trade_date.desc())
+        .limit(n)
+        .all()
+    )
+    return sorted(r[0] for r in rows)
+
+
+def calibrate_snapshot(snapshot: dict, known_bars: dict) -> dict:
+    """
+    用"已经有目标日 K 线"的股票做标定集，回答两个问题：
+
+      1. 成交量单位比 = 库内 volume / 快照成交量
+         （sina hfq 给的是**股**，东财 spot_em 给的是**手**，比值应约等于 100。
+          但不硬编码 —— 上游改单位时硬编码会静默污染数据，实测反推不会。）
+
+      2. 换算方法本身对不对？
+         对标定集里的每只股票，用"因子 = 前一日 hfq 收盘 / 快照昨收"推出
+         预测 hfq 收盘 = 快照最新价 × 因子，再与库里**已知的真实 hfq 收盘**比。
+         误差大就说明方法不成立（除权、停牌、数据错位），应当中止而不是写脏数据。
+
+    snapshot:   {code: {"open","high","low","close","prev_close","volume","turnover"}}
+    known_bars: {code: (前一日 hfq 收盘, 目标日真实 hfq 收盘, 目标日真实 volume)}
+
+    返回 {"n", "vol_ratio", "price_err_pct", "samples"}；标定集为空时 vol_ratio=None。
+    """
+    vol_ratios, price_errs = [], []
+    for code, (prev_hfq_close, real_hfq_close, real_vol) in known_bars.items():
+        snap = snapshot.get(code)
+        if not snap:
+            continue
+        sv, pc, lc = snap.get("volume"), snap.get("prev_close"), snap.get("close")
+        if sv and real_vol:
+            vol_ratios.append(real_vol / sv)
+        if pc and lc and prev_hfq_close and real_hfq_close:
+            factor = prev_hfq_close / pc
+            predicted = lc * factor
+            price_errs.append(abs(predicted / real_hfq_close - 1) * 100)
+
+    def _median(xs):
+        if not xs:
+            return None
+        xs = sorted(xs)
+        m = len(xs) // 2
+        return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+    return {
+        "n":             len(price_errs),
+        "vol_ratio":     _median(vol_ratios),
+        "price_err_pct": _median(price_errs),
+        "samples":       len(known_bars),
+    }
+
+
+# 标定集里"预测 hfq 收盘 vs 已知真实 hfq 收盘"的中位误差超过这个百分比就中止。
+# 正常情况下应当接近 0（同一天、同一只股票，纯粹的比例换算）。
+SNAPSHOT_MAX_PRICE_ERR_PCT = 0.5
+# 标定集至少要这么多只，否则样本不足以支撑单位比与误差判断
+SNAPSHOT_MIN_CALIB = 20
+
+
+def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
+                               dry_run: bool = False) -> dict:
+    """
+    **一次**请求补齐全市场最新一根 K 线（浅增量）。
+
+    为什么要有这条路径
+    ------------------
+    逐只 stock_zh_a_daily 增量在 akshare 抖动时会把 `_retry` 的 worker 池占满并
+    卡死（ARCHITECTURE.md §7 已记录的缺陷），实测 29 分钟只推进 13 只、CPU 0%。
+    而"每只只差最近一两根"恰恰是日常最高频的场景。快照只发 1 次请求，
+    没有池可以被占满，几秒完成。
+
+    它**不替代** full / init-missing —— 补不了历史空洞，只补最新一根。
+
+    复权口径（本函数最关键的地方）
+    ------------------------------
+    spot_em 返回**不复权**价，price_data 存**后复权**。换算：
+
+        因子 = 该股前一交易日的 hfq 收盘 / 快照的「昨收」(不复权)
+        新 bar = 快照 OHLC × 因子
+
+    前提是该股最后一根 K 线正好是快照的前一交易日 —— 只对满足此条件的股票补，
+    其余跳过（因子会把中间的涨跌错当成复权差，算出错的价）。
+
+    安全机制
+    --------
+    写库之前先用"已经有目标日 bar"的股票做标定集自证：
+      * 成交量单位比实测反推（sina=股 / 东财=手，约 100），不硬编码
+      * 用同一套换算重建它们**已知的**真实 hfq 收盘，中位误差 >
+        SNAPSHOT_MAX_PRICE_ERR_PCT 就中止，一个字节都不写
+
+    已知取舍
+    --------
+    若某股当日除权除息，hfq 因子当天会变，用昨收推出的因子会有约等于股息率的
+    偏差（通常 1-2%），且这类股票会被上面的误差检查放过（它只看中位数）。
+    后续任何一次正常的逐只 incremental / full 会用真实 hfq 值覆盖该 bar。
+
+    返回 {"filled", "skipped", "vol_ratio", "price_err_pct", "target_date", ...}
+    """
+    try:
+        df = _retry(ak.stock_zh_a_spot_em, _timeout=90)
+    except Exception as e:
+        logger.warning(f"快照拉取失败: {e}")
+        return {"filled": 0, "skipped": 0, "error": str(e)}
+    if df is None or df.empty:
+        return {"filled": 0, "skipped": 0, "error": "快照为空"}
+
+    # ── 解析快照 ──
+    snapshot = {}
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip()
+        if not code:
+            continue
+        def _f(key):
+            v = row.get(key)
+            try:
+                return float(v) if v is not None and pd.notna(v) else None
+            except (TypeError, ValueError):
+                return None
+        snapshot[code] = {
+            "open":       _f("今开"),
+            "high":       _f("最高"),
+            "low":        _f("最低"),
+            "close":      _f("最新价"),
+            "prev_close": _f("昨收"),
+            "volume":     _f("成交量"),
+            "turnover":   _f("换手率"),
+        }
+
+    # ── 交易日：用库里已有数据反推，不猜今天是不是交易日 ──
+    dates = _recent_trading_dates(db)
+    if len(dates) < 2:
+        return {"filled": 0, "skipped": 0, "error": "库内交易日不足，无法定位目标日"}
+    target = target_date or dates[-1]
+    if target not in dates:
+        return {"filled": 0, "skipped": 0, "error": f"目标日 {target} 不在库内交易日序列中"}
+    idx = dates.index(target)
+    if idx == 0:
+        return {"filled": 0, "skipped": 0, "error": "目标日没有前一交易日可用于换算"}
+    prev = dates[idx - 1]
+
+    # ── 每只股票的最后一根 K 线 ──
+    from sqlalchemy import func as _func
+    latest_per_code = dict(
+        db.query(PriceData.stock_code, _func.max(PriceData.trade_date))
+          .group_by(PriceData.stock_code).all()
+    )
+    prev_closes = dict(
+        db.query(PriceData.stock_code, PriceData.close)
+          .filter(PriceData.trade_date == prev).all()
+    )
+
+    # ── 标定集：已经有 target 这根 bar 的股票 ──
+    known = {}
+    for code, close, vol in db.query(
+            PriceData.stock_code, PriceData.close, PriceData.volume
+    ).filter(PriceData.trade_date == target).all():
+        pc = prev_closes.get(code)
+        if pc and close:
+            known[code] = (pc, close, vol)
+
+    calib = calibrate_snapshot(snapshot, known)
+    logger.info(
+        f"快照标定：样本 {calib['n']}/{calib['samples']} 只，"
+        f"成交量单位比 {calib['vol_ratio']}，价格重建中位误差 {calib['price_err_pct']}%"
+    )
+    if calib["n"] < SNAPSHOT_MIN_CALIB:
+        return {"filled": 0, "skipped": 0, "error":
+                f"标定样本不足（{calib['n']} < {SNAPSHOT_MIN_CALIB}），拒绝写入", **calib}
+    if calib["price_err_pct"] is None or calib["price_err_pct"] > SNAPSHOT_MAX_PRICE_ERR_PCT:
+        return {"filled": 0, "skipped": 0, "error":
+                f"价格重建误差 {calib['price_err_pct']}% 超过阈值 "
+                f"{SNAPSHOT_MAX_PRICE_ERR_PCT}%，拒绝写入", **calib}
+    vol_ratio = calib["vol_ratio"] or 1.0
+
+    # ── 补写 ──
+    filled = skipped = 0
+    for code, snap in snapshot.items():
+        last = latest_per_code.get(code)
+        if last != prev:
+            skipped += 1          # 不是"恰好落后一天"，因子不可靠，跳过
+            continue
+        pc, lc = snap["prev_close"], snap["close"]
+        base = prev_closes.get(code)
+        if not (pc and lc and base) or pc <= 0:
+            skipped += 1
+            continue
+        factor = base / pc
+        if not (0.01 < factor < 1000):
+            skipped += 1          # 因子离谱，多半是数据错位
+            continue
+        if dry_run:
+            filled += 1
+            continue
+        db.add(PriceData(
+            stock_code=code, trade_date=target,
+            open=(snap["open"] or lc) * factor,
+            high=(snap["high"] or lc) * factor,
+            low=(snap["low"] or lc) * factor,
+            close=lc * factor,
+            volume=(snap["volume"] or 0) * vol_ratio,
+            turnover_rate=snap["turnover"],
+        ))
+        filled += 1
+    if not dry_run:
+        db.commit()
+
+    logger.info(f"快照浅增量({target})：补 {filled} 只，跳过 {skipped} 只"
+                + ("（dry-run，未写库）" if dry_run else ""))
+    return {"filled": filled, "skipped": skipped, "target_date": str(target),
+            "prev_date": str(prev), "dry_run": dry_run, **calib}
 
 
 def fetch_turnover_history(db: Session, stock_code: str, days: int = 365) -> int:

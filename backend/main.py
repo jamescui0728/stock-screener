@@ -56,28 +56,38 @@ def _daily_data_update():
     try:
         logger.info("定时任务：开始每日数据更新")
 
-        # 1. 价格 — A 股全市场增量（仅补 max(trade_date)+1 到今天）
+        # 1a. 价格 — 先走快照浅增量：一次请求补齐"恰好落后一个交易日"的绝大多数股票。
+        # 逐只增量在 akshare 抖动时会把 _retry worker 池占满卡死（ARCHITECTURE.md §7），
+        # 实测 29 分钟只推进 13 只。快照没有池可占满，几秒完成。
+        try:
+            r = fetch_all_price_data(db, mode="snapshot")
+            logger.info(f"定时任务：价格快照浅增量 {r}")
+        except Exception as e:
+            logger.error(f"定时任务：价格快照失败: {e}")
+
+        # 1b. 再对快照没覆盖到的（落后多天 / 停牌复牌 / 快照缺失）走逐只增量补齐。
+        # 经 1a 之后这里通常只剩几十只，卡死风险大幅下降。
         try:
             r = fetch_all_price_data(db, mode="incremental")
-            logger.info(f"定时任务：价格增量 {r}")
+            logger.info(f"定时任务：价格逐只增量 {r}")
         except Exception as e:
             logger.error(f"定时任务：价格增量失败: {e}")
 
-        # 1b. 沪深300 基准（之前永不更新的 bug 已修，这里再保一道）
+        # 1c. 沪深300 基准（之前永不更新的 bug 已修，这里再保一道）
         try:
             ensure_benchmark_data(db)
             logger.info("定时任务：沪深300 基准已增量")
         except Exception as e:
             logger.error(f"定时任务：基准增量失败: {e}")
 
-        # 1c. 今日换手率（观察模式 — sina 不返回，单次东财快照补齐）
+        # 1d. 今日换手率（观察模式 — sina 不返回，单次东财快照补齐）
         try:
             r = fetch_turnover_today(db)
             logger.info(f"定时任务：今日换手率 {r}")
         except Exception as e:
             logger.error(f"定时任务：换手率快照失败: {e}")
 
-        # 1d. 上市以来价格分位（描述性指标，随最新价刷新）
+        # 1e. 上市以来价格分位（描述性指标，随最新价刷新）
         try:
             from engines.price_position import compute_price_pctile_life
             n = compute_price_pctile_life(db)
