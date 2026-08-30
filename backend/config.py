@@ -179,6 +179,65 @@ class Settings(BaseSettings):
     OPT_W_IC:       float = 0.30
     OPT_W_SHARPE:   float = 0.20
 
+    # ───────── 自选股 EMA20 跟随标签 ─────────
+    # 与长/短期信号无关的一套独立纪律规则，只作用于自选股页面：
+    #   线上拿住、线下离场；站稳均线 + 放量才跟进；涨 30% / 70% 分批止盈。
+    # 判定一律用**日收盘价**（price_data 只有日线，没有分钟级数据）。
+    WATCH_EMA_PERIOD:        int   = 20     # EMA 周期
+    WATCH_VOL_SPIKE_RATIO:   float = 1.5    # 当日量 >= 该倍数 × 前 20 日均量 → 视为放量
+    WATCH_TAKE_PROFIT_1_PCT: float = 30.0   # 第一档止盈（出一部分）
+    WATCH_TAKE_PROFIT_2_PCT: float = 70.0   # 第二档止盈（再出一部分）
+
+    # ───────── MACD 零轴上方回踩金叉（买入关注） ─────────
+    # 标准 12/26/9。只看日线 MACD，不掺基本面 / 舆情 / 行业 / 宏观任何其他维度。
+    # 命中条件：DIF>0 且 DEA>0 且 昨日 DIF≤DEA 且 今日 DIF>DEA
+    MACD_FAST:   int = 12
+    MACD_SLOW:   int = 26
+    MACD_SIGNAL: int = 9
+
+    # 全市场标签扫描：K 线截止日早于今天这么多天，前端标黄提示数据陈旧
+    WATCH_STALE_WARN_DAYS: int = 7
+
+    # ═══════════════════════════════════════════════════════════
+    # 跳空缺口信号（突破 / 加油 / 衰竭 / 加仓）
+    # ═══════════════════════════════════════════════════════════
+    # 只看日线 OHLC + 成交量。price_data 是后复权，除权造成的假缺口已被消掉，
+    # 识别出来的都是真实跳空。
+    #
+    # 向上跳空定义：今日最低 > 昨日最高，缺口区间 [H_prev, L_today]
+    #   缺口下沿 = H_prev（价格低的一侧）；缺口上沿 = L_today（价格高的一侧）
+    #   "回补" = 价格跌回下沿（low <= H_prev），把缺口完全填掉
+    GAP_MIN_PCT: float = 1.0          # 跳空幅度下限（%），滤掉毫米级缺口
+
+    # 规则 1 突破：底部放量跳空 + 三天不补
+    GAP_BOTTOM_LOW_LOOKBACK: int   = 60    # "底部"参照的低点回溯天数
+    GAP_BOTTOM_MAX_ABOVE_PCT: float = 20.0 # 跳空前收盘距该低点 <= 该比例才算底部
+    GAP_BREAKOUT_VOL_RATIO: float  = 2.0   # 放量倍数（相对前 20 日均量）
+
+    # 规则 2 加油：上涨途中跳空 + 温和放量 + 三天不补
+    # 上界避开天量 —— 天量跳空更可能是衰竭而不是中继
+    GAP_RUNAWAY_VOL_MIN: float = 1.2
+    GAP_RUNAWAY_VOL_MAX: float = 2.5
+
+    GAP_HOLD_DAYS: int = 3            # 规则 1/2 的"连续 N 天不补缺口"
+
+    # 规则 3 衰竭：大幅上涨后天量 + 长上影线（不要求跳空）
+    GAP_EXHAUST_RUNUP_DAYS: int    = 20     # "大幅上涨"的观察窗口
+    GAP_EXHAUST_RUNUP_PCT: float   = 30.0   # 该窗口涨幅下限（%）
+    GAP_EXHAUST_VOL_RATIO: float   = 3.0    # "天量"倍数
+    GAP_EXHAUST_SHADOW_BODY: float = 2.0    # 上影 >= 该倍数 × 实体
+    GAP_EXHAUST_SHADOW_RANGE: float = 0.5   # 且上影 >= 该比例 × 全日振幅
+
+    # 规则 4 加仓：涨后回调，回踩缺口上沿守住不破，量能萎缩
+    GAP_PULLBACK_LOOKBACK: int      = 60    # 向前找多少个交易日内的未回补缺口
+    GAP_PULLBACK_RUNUP_PCT: float   = 15.0  # 缺口后须涨过该幅度才谈得上"回调"
+    GAP_PULLBACK_TOUCH_PCT: float   = 3.0   # 最低价距缺口上沿 <= 该比例算"回踩到位"
+    GAP_PULLBACK_VOL_SHRINK: float  = 0.7   # 当日量 <= 该倍数 × 前 20 日均量
+    GAP_PULLBACK_SHRINK_DAYS: int   = 3     # 且最近 N 日成交量逐日递减
+
+    # 信号确认后保持多少个交易日仍显示（含确认当日）
+    GAP_SIGNAL_VALID_DAYS: int = 5
+
     # ───────── 模拟盘（Paper Trading） ─────────
     # 初始资金只在下次"重置账户"时生效（不会改现有账户余额）
     PAPER_INIT_CASH: float = 1_000_000.0

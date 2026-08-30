@@ -11,22 +11,25 @@
             <span class="code">{{ detail.info.code }}</span>
             <span class="name">{{ detail.info.name }}</span>
             <span class="signal-pair">
-              <span class="signal-label">长期</span>
-              <SignalBadge :signal="detail.info.signal" effect="dark" />
-              <span class="signal-label" style="margin-left:10px">短期</span>
-              <SignalBadge v-if="detail.info.short_signal" :signal="detail.info.short_signal" effect="dark" />
-              <span v-else style="color:#bbb;font-size:12px">— 数据不足</span>
+              <span class="signal-label">纪律</span>
+              <WatchTagBadge :watch="{ tag: detail.info.watch_tag, tag_reason: detail.info.watch_tag_reason }" />
+              <!-- 金叉只在触发当日为真，"没金叉"是常态而非异常。
+                   只有真的算不出 MACD（K 线不足 34 根）时才提示数据不足；
+                   有数据但今日未金叉时不占位，具体原因见下方 MACD 提示条。 -->
+              <el-tag v-if="detail.info.macd_cross_up" type="danger" effect="dark"
+                      size="small" style="margin-left:10px;font-weight:700">⚡ MACD 金叉</el-tag>
+              <span v-else-if="detail.info.macd_dif == null"
+                    style="color:#bbb;font-size:12px;margin-left:10px">— MACD 数据不足</span>
             </span>
           </div>
           <div class="header-actions">
             <el-button size="small" @click="addWatch">
               <el-icon><Star /></el-icon> 加自选
             </el-button>
-            <el-button size="small" type="primary" @click="refreshSignal" :loading="refreshing">
-              重新评估
-            </el-button>
-            <el-button size="small" @click="refreshShortSignal" :loading="refreshingShort">
-              重算短期
+            <!-- 原「重新评估」/「重算短期」调的是已停用的长/短期信号接口，
+                 刷完页面上可见的纪律 / MACD 标签纹丝不动。换成真正驱动这些标签的重算。 -->
+            <el-button size="small" type="primary" @click="refreshWatch" :loading="refreshingWatch">
+              重算纪律 / MACD
             </el-button>
             <el-button size="small" @click="updateNews" :loading="updatingNews">
               更新舆情
@@ -34,19 +37,19 @@
           </div>
         </div>
 
-        <!-- 长期信号理由 -->
+        <!-- EMA20 跟随纪律 -->
         <el-alert
-          v-if="detail.info.signal_reason"
-          :title="'长期：' + detail.info.signal_reason"
-          :type="alertType"
+          v-if="detail.info.watch_tag_reason"
+          :title="'纪律：' + detail.info.watch_tag_reason"
+          :type="watchAlertType"
           show-icon :closable="false"
           class="signal-alert"
         />
-        <!-- 短期信号理由 -->
+        <!-- MACD 零轴上方回踩金叉 -->
         <el-alert
-          v-if="detail.info.short_signal_reason"
-          :title="'短期：' + detail.info.short_signal_reason"
-          :type="shortAlertType"
+          v-if="detail.info.macd_reason"
+          :title="'MACD：' + detail.info.macd_reason"
+          :type="detail.info.macd_cross_up ? 'error' : 'info'"
           show-icon :closable="false"
           class="signal-alert"
         />
@@ -152,15 +155,14 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { stockApi, watchlistApi, dataApi } from '@/api'
-import SignalBadge from '@/components/SignalBadge.vue'
+import WatchTagBadge from '@/components/WatchTagBadge.vue'
 import ScoreItem from '@/components/ScoreItem.vue'
 import ScoreBar from '@/components/ScoreBar.vue'
 
 const route       = useRoute()
 const router      = useRouter()
 const loading         = ref(false)
-const refreshing      = ref(false)
-const refreshingShort = ref(false)
+const refreshingWatch = ref(false)
 const updatingNews    = ref(false)
 const detail          = ref(null)
 const chartMode       = ref('profit')
@@ -171,8 +173,13 @@ function _sigToAlertType(s) {
   if (s === 'STRONG_SELL' || s === 'SELL') return 'error'
   return 'warning'
 }
-const alertType      = computed(() => _sigToAlertType(detail.value?.info?.signal))
-const shortAlertType = computed(() => _sigToAlertType(detail.value?.info?.short_signal))
+// 纪律标签 → el-alert 的配色。止损用 error（最需要一眼看见），可跟进用 success。
+const watchAlertType = computed(() => ({
+  FOLLOW:    'success',
+  HOLD:      'info',
+  STOP_LOSS: 'error',
+  NO_DATA:   'info',
+}[detail.value?.info?.watch_tag] || 'info'))
 
 const sentimentTagType = computed(() => {
   if (!detail.value?.news?.length) return 'info'
@@ -305,27 +312,20 @@ async function load() {
   }
 }
 
-async function refreshSignal() {
-  refreshing.value = true
+/**
+ * 重算纪律标签 / MACD / 缺口信号。
+ *
+ * 后端没有"只算一只"的入口 —— 缺口和纪律都依赖全市场一次性拉价格再批量算，
+ * 单只重算反而要多打一次库。全市场实测约 5 秒，可以接受，所以这里直接走全量。
+ */
+async function refreshWatch() {
+  refreshingWatch.value = true
   try {
-    await stockApi.refreshSignal(route.params.code)
+    await stockApi.refreshWatchTags()
     await load()
-    ElMessage.success('长期信号已更新')
+    ElMessage.success('纪律 / MACD / 缺口信号已重算')
   } finally {
-    refreshing.value = false
-  }
-}
-
-async function refreshShortSignal() {
-  refreshingShort.value = true
-  try {
-    await stockApi.refreshShortSignal(route.params.code)
-    await load()
-    ElMessage.success('短期信号已更新')
-  } catch (e) {
-    ElMessage.error('刷新短期信号失败：' + (e.response?.data?.detail || e.message))
-  } finally {
-    refreshingShort.value = false
+    refreshingWatch.value = false
   }
 }
 

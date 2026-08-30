@@ -13,23 +13,26 @@
             :prefix-icon="Search"
           />
         </el-form-item>
-        <el-form-item label="长期信号">
-          <el-select v-model="filter.signal" clearable placeholder="全部" style="width:120px">
-            <el-option label="🟢 必买" value="STRONG_BUY" />
-            <el-option label="🟢 买入" value="BUY" />
-            <el-option label="🟡 持有" value="HOLD" />
-            <el-option label="🔴 卖出" value="SELL" />
-            <el-option label="🔴 必卖" value="STRONG_SELL" />
+        <el-form-item label="纪律">
+          <el-select v-model="filter.watch_tag" clearable placeholder="全部" style="width:130px">
+            <el-option label="🟢 可跟进" value="FOLLOW" />
+            <el-option label="🔵 持有" value="HOLD" />
+            <el-option label="🔴 止损" value="STOP_LOSS" />
+            <el-option label="⚪ 数据不足" value="NO_DATA" />
           </el-select>
         </el-form-item>
-        <el-form-item label="短期信号">
-          <el-select v-model="filter.short_signal" clearable placeholder="全部" style="width:120px">
-            <el-option label="🟢 必买" value="STRONG_BUY" />
-            <el-option label="🟢 买入" value="BUY" />
-            <el-option label="🟠 观察" value="WATCH" />
-            <el-option label="🟡 持有" value="HOLD" />
-            <el-option label="🔴 卖出" value="SELL" />
-            <el-option label="🔴 必卖" value="STRONG_SELL" />
+        <el-form-item label="MACD">
+          <el-select v-model="filter.macd_cross_up" clearable placeholder="全部" style="width:170px">
+            <el-option label="⚡ 零轴上方回踩金叉" :value="true" />
+            <el-option label="未命中" :value="false" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="缺口">
+          <el-select v-model="filter.gap_signal" clearable placeholder="全部" style="width:130px">
+            <el-option label="🟢 突破" value="BREAKOUT" />
+            <el-option label="🔵 加油" value="RUNAWAY" />
+            <el-option label="🟡 加仓" value="ADD" />
+            <el-option label="🔴 衰竭" value="EXHAUST" />
           </el-select>
         </el-form-item>
         <el-form-item label="行业">
@@ -60,11 +63,8 @@
       <template #header>
         <div class="card-header">
           <span>共 {{ total }} 只股票</span>
-          <el-button size="small" @click="refreshAll" :loading="refreshing">
-            刷新长期信号
-          </el-button>
-          <el-button size="small" @click="refreshAllShort" :loading="refreshingShort">
-            刷新短期信号
+          <el-button size="small" @click="refreshWatch" :loading="refreshingWatch">
+            重算纪律 / MACD
           </el-button>
         </div>
       </template>
@@ -91,44 +91,72 @@
             <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="长期信号" width="100">
+        <el-table-column label="纪律" width="110" sortable prop="watch_tag">
           <template #header>
-            <el-tooltip content="侧重基本面 + 估值，hold 6-12 月" placement="top">
-              <span>长期信号 <el-icon><QuestionFilled /></el-icon></span>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <SignalBadge :signal="row.signal" />
-          </template>
-        </el-table-column>
-        <el-table-column label="短期信号" width="100">
-          <template #header>
-            <el-tooltip content="侧重动量 + 量价 + 宏观，hold 1-2 周" placement="top">
-              <span>短期信号 <el-icon><QuestionFilled /></el-icon></span>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
             <el-tooltip
-              v-if="row.short_observe_candidate"
-              :content="row.short_signal_reason || '短期评分已达买入阈值，但市场趋势过滤未通过'"
+              content="EMA20 跟随纪律：线上拿住、线下离场；站稳均线且放量才跟进"
               placement="top"
             >
-              <el-tag type="warning" effect="dark" size="small" class="observe-tag">观察</el-tag>
+              <span>纪律 <el-icon><QuestionFilled /></el-icon></span>
             </el-tooltip>
-            <SignalBadge v-else-if="row.short_signal" :signal="row.short_signal" />
+          </template>
+          <template #default="{ row }">
+            <WatchTagBadge :watch="rowWatch(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="MACD" width="100" sortable prop="macd_cross_up">
+          <template #header>
+            <el-tooltip
+              content="只看日线 MACD 零轴上方的回踩金叉：DIF>0 且 DEA>0 且今日 DIF 上穿 DEA"
+              placement="top"
+            >
+              <span>MACD <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <el-tooltip v-if="row.macd_reason" :content="row.macd_reason" placement="top">
+              <el-tag v-if="row.macd_cross_up" type="danger" effect="dark" size="small"
+                      class="macd-tag">⚡ 金叉</el-tag>
+              <span v-else class="no-data">—</span>
+            </el-tooltip>
+            <span v-else class="no-data">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="缺口" width="110" sortable prop="gap_signal">
+          <template #header>
+            <el-tooltip
+              content="跳空缺口形态：突破(底部放量跳空) / 加油(上涨途中跳空) / 加仓(回踩缺口上沿守住) / 衰竭(天量长上影)"
+              placement="top"
+            >
+              <span>缺口 <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <GapBadge :signal="row.gap_signal" :days-since="row.gap_days_since" :confirm-date="row.gap_confirm_date"
+                      :reason="row.gap_reason" :lower="row.gap_lower" :upper="row.gap_upper" />
+          </template>
+        </el-table-column>
+        <el-table-column label="距 EMA20" width="110" sortable prop="watch_above_ema_pct">
+          <template #default="{ row }">
+            <span v-if="row.watch_above_ema_pct != null" class="ema-cell"
+                  :class="row.watch_above_ema_pct >= 0 ? 'ema-above' : 'ema-below'">
+              {{ row.watch_above_ema_pct >= 0 ? '▲ +' : '▼ ' }}{{ row.watch_above_ema_pct.toFixed(1) }}%
+            </span>
+            <span v-else class="no-data">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="K线截止" width="110" sortable prop="watch_kline_date">
+          <template #default="{ row }">
+            <span v-if="row.watch_kline_date"
+                  :class="{ 'kline-stale': isStale(row.watch_kline_date) }">
+              {{ row.watch_kline_date }}
+            </span>
             <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
         <el-table-column label="综合评分" width="140" sortable prop="composite_score">
           <template #default="{ row }">
             <ScoreBar :score="row.composite_score" :max="100" />
-          </template>
-        </el-table-column>
-        <el-table-column label="短期评分" width="120" sortable prop="short_composite_score">
-          <template #default="{ row }">
-            <ScoreBar v-if="row.short_composite_score != null"
-                      :score="row.short_composite_score" :max="100" color="#9c27b0" />
-            <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
         <el-table-column label="总收益分位" width="120" sortable prop="price_pctile_life">
@@ -163,15 +191,12 @@
             <ScoreBar :score="row.score_valuation" :max="20" color="#f56c6c" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" text
               @click.stop="$router.push(`/stocks/${row.code}`)">详情</el-button>
             <el-button size="small" text @click.stop="addWatch(row)">
               <el-icon><Star /></el-icon>
-            </el-button>
-            <el-button size="small" text @click.stop="refreshOne(row.code)" :loading="refreshingCode === row.code">
-              <el-icon><Refresh /></el-icon>
             </el-button>
           </template>
         </el-table-column>
@@ -196,15 +221,14 @@ import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { industryApi, stockApi, watchlistApi } from '@/api'
 import ScoreBar from '@/components/ScoreBar.vue'
-import SignalBadge from '@/components/SignalBadge.vue'
+import WatchTagBadge from '@/components/WatchTagBadge.vue'
+import GapBadge from '@/components/GapBadge.vue'
 
 const route  = useRoute()
 const router = useRouter()
 
 const loading      = ref(false)
-const refreshing      = ref(false)
-const refreshingShort = ref(false)
-const refreshingCode  = ref('')
+const refreshingWatch = ref(false)
 const stocks       = ref([])
 const industries   = ref([])
 const total        = ref(0)
@@ -212,8 +236,9 @@ const page         = ref(1)
 
 const filter = ref({
   keyword:         '',
-  signal:          '',
-  short_signal:    '',
+  watch_tag:       '',
+  macd_cross_up:   '',
+  gap_signal:      '',
   industry_code:   route.query.industry || '',
   min_fundamental: 0,
   min_composite:   0,
@@ -237,41 +262,41 @@ async function load() {
 function search() { page.value = 1; load() }
 function reset()  {
   filter.value = {
-    keyword: '', signal: '', short_signal: '',
+    keyword: '', watch_tag: '', macd_cross_up: '', gap_signal: '',
     industry_code: '', min_fundamental: 0, min_composite: 0,
   }
   load()
 }
 
-async function refreshOne(code) {
-  refreshingCode.value = code
+async function refreshWatch() {
+  refreshingWatch.value = true
   try {
-    await stockApi.refreshSignal(code)
+    const r = await stockApi.refreshWatchTags()
+    ElMessage.success(
+      `已重算 ${r.scanned} 只：可跟进 ${r.tag_counts.FOLLOW || 0}，` +
+      `MACD 金叉 ${r.macd_cross_up}，缺口 ${Object.values(r.gap_counts || {}).reduce((a, b) => a + b, 0)}`
+    )
     await load()
-    ElMessage.success('信号已刷新')
   } finally {
-    refreshingCode.value = ''
+    refreshingWatch.value = false
   }
 }
 
-async function refreshAll() {
-  refreshing.value = true
-  try {
-    await stockApi.refreshAllSignals()
-    ElMessage.success('长期信号刷新已启动')
-  } finally {
-    refreshing.value = false
+// WatchTagBadge 吃的是自选股接口那种嵌套 watch 对象；
+// 筛选接口把字段平铺在行上，这里适配一下，避免为此改动组件。
+function rowWatch(row) {
+  return {
+    tag:        row.watch_tag,
+    tp_level:   null,
+    tag_reason: row.watch_tag_reason,
   }
 }
 
-async function refreshAllShort() {
-  refreshingShort.value = true
-  try {
-    await stockApi.refreshAllShortSignals()
-    ElMessage.success('短期信号刷新已启动（约 1-2 分钟后再点筛选查看）')
-  } finally {
-    refreshingShort.value = false
-  }
+// K 线截止日早于阈值天数 → 标黄。全市场多数股票行情未更新时很常见。
+function isStale(d) {
+  if (!d) return false
+  const days = (Date.now() - new Date(d + 'T00:00:00').getTime()) / 86400000
+  return days > 7
 }
 
 async function addWatch(row) {
@@ -308,5 +333,9 @@ watch(() => route.query.industry, (v) => {
 }
 .industry-link:hover { text-decoration: underline; }
 .no-data { color: #c0c4cc; font-size: 13px; }
-.observe-tag { font-weight: 700; }
+.macd-tag { font-weight: 700; }
+.ema-cell { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ema-above { color: #67c23a; }
+.ema-below { color: #f56c6c; }
+.kline-stale { color: #e6a23c; font-weight: 600; }
 </style>

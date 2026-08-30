@@ -110,6 +110,24 @@ def list_stocks(
         None,
         description="短期信号聚合过滤（buy / sell / watch），语义同 signal_group（v200 新增）",
     ),
+    watch_tag: Optional[str] = Query(
+        None,
+        description=(
+            "EMA20 跟随纪律标签精确匹配：FOLLOW（可跟进）/ HOLD（持有）/ "
+            "STOP_LOSS（止损）/ NO_DATA（数据不足）。大小写不敏感"
+        ),
+    ),
+    macd_cross_up: Optional[bool] = Query(
+        None,
+        description="只看 MACD 零轴上方回踩金叉（当日命中）；传 false 则只看未命中的",
+    ),
+    gap_signal: Optional[str] = Query(
+        None,
+        description=(
+            "跳空缺口信号精确匹配：BREAKOUT（突破）/ RUNAWAY（加油）/ "
+            "EXHAUST（衰竭）/ ADD（加仓）。大小写不敏感"
+        ),
+    ),
     min_fundamental: float        = Query(0.0),
     min_composite:   float        = Query(0.0),
     page:  int = Query(1, ge=1),
@@ -186,17 +204,35 @@ def list_stocks(
             q = _apply_short_watch_filter(q)
         else:
             q = q.filter_by(short_signal=ss)
+    # EMA20 跟随纪律 / MACD 关注（全市场扫描落库的结果）
+    if watch_tag:
+        wt = watch_tag.upper()
+        valid = {"FOLLOW", "HOLD", "STOP_LOSS", "NO_DATA"}
+        if wt not in valid:
+            raise HTTPException(400, f"watch_tag 仅支持 {'/'.join(sorted(valid))}，收到 {watch_tag!r}")
+        q = q.filter(Stock.watch_tag == wt)
+    if macd_cross_up is not None:
+        q = q.filter(Stock.macd_cross_up == macd_cross_up)
+    if gap_signal:
+        gs = gap_signal.upper()
+        valid_gap = {"BREAKOUT", "RUNAWAY", "EXHAUST", "ADD"}
+        if gs not in valid_gap:
+            raise HTTPException(400, f"gap_signal 仅支持 {'/'.join(sorted(valid_gap))}，收到 {gap_signal!r}")
+        q = q.filter(Stock.gap_signal == gs)
+
     if min_fundamental > 0:
         q = q.filter(Stock.fundamental_score >= min_fundamental)
     if min_composite > 0:
         q = q.filter(Stock.composite_score >= min_composite)
 
     total = q.count()
-    order_col = (
-        Stock.short_composite_score.desc().nullslast()
-        if short_signal_group or short_signal
-        else Stock.composite_score.desc().nullslast()
-    )
+    if watch_tag or macd_cross_up is not None or gap_signal:
+        # 按纪律筛选时，用"距均线幅度"排序更有意义：可跟进看谁刚起步，止损看谁跌得深
+        order_col = Stock.watch_above_ema_pct.desc().nullslast()
+    elif short_signal_group or short_signal:
+        order_col = Stock.short_composite_score.desc().nullslast()
+    else:
+        order_col = Stock.composite_score.desc().nullslast()
     stocks = q.order_by(order_col).offset((page - 1) * limit).limit(limit).all()
 
     # 批量取行业评分，避免 N+1 查询
@@ -254,6 +290,20 @@ def refresh_all_signals(background_tasks: BackgroundTasks):
     return {"message": "信号刷新已在后台启动"}
 
 
+@router.post("/watch/refresh-all")
+def refresh_all_watch_tags(
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """
+    全市场重算 EMA20 跟随纪律标签 + MACD 零轴上方回踩金叉，写回 stocks 表。
+
+    同步执行 —— 实测 5500 只约 5 秒，纯 DB 计算不打外部 API，不值得开后台任务。
+    """
+    from engines.watch_tag import scan_market
+    return scan_market(db)
+
+
 # ── 短期信号（v200 新增）─────────────────────────────────
 from engines.short_signal_engine import (
     generate_short_signal,
@@ -300,18 +350,46 @@ class WatchlistAdd(BaseModel):
 
 @router.get("/watchlist")
 def get_watchlist(
+    account_id: Optional[int] = Query(
+        None,
+        description="止盈涨幅的成本价取自哪个模拟盘账户；不传用最早创建的那个",
+    ),
+    refresh_price: bool = Query(
+        False,
+        description=(
+            "是否为止盈涨幅现拉一次不复权实时价。默认 False = 只读 10 分钟缓存、"
+            "不发网络请求（冷缓存时不出止盈标签）；True 会打 sina，最长约 14 秒"
+        ),
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """
+    自选股列表。除长/短期信号外，每条附带一个 EMA20 跟随标签
+    （engines/watch_tag.py，与两套信号互不相干），前端自选股页面用它替代短期标签。
+    """
+    from engines.watch_tag import compute_watch_tags
+
     items = db.query(Watchlist).filter_by(user_id=user.id).all()
+    if not items:
+        return []
+
+    codes = [i.stock_code for i in items]
+    # 批量取，避免逐股查询
+    stock_map = {s.code: s for s in db.query(Stock).filter(Stock.code.in_(codes)).all()}
+    industry_scores = _get_industry_score_map(db)
+    watch_tags = compute_watch_tags(db, codes, user.id, account_id, refresh_price)
+
     result = []
     for item in items:
-        stock = db.query(Stock).filter_by(code=item.stock_code).first()
-        if stock:
-            d = _stock_summary(stock)
-            d["note"]     = item.note
-            d["added_at"] = str(item.added_at)
-            result.append(d)
+        stock = stock_map.get(item.stock_code)
+        if not stock:
+            continue
+        d = _stock_summary(stock, industry_scores)
+        d["note"]     = item.note
+        d["added_at"] = str(item.added_at)
+        d["watch"]    = watch_tags.get(item.stock_code)
+        result.append(d)
     return result
 
 
@@ -901,10 +979,11 @@ def paper_quote(code: str, db: Session = Depends(get_db)):
     return {
         "code":                  stock.code,
         "name":                  stock.name,
-        "signal":                stock.signal,
         "composite_score":       stock.composite_score,
-        "short_signal":          stock.short_signal,
-        "short_composite_score": stock.short_composite_score,
+        # 买卖信号已停用，改带 EMA20 跟随纪律 + MACD 关注
+        "watch_tag":             stock.watch_tag,
+        "watch_tag_reason":      stock.watch_tag_reason,
+        "macd_cross_up":         bool(stock.macd_cross_up),
         "close":                 price,
         "trade_date":            trade_date,
     }
@@ -1164,6 +1243,26 @@ def _stock_summary(s: Stock, industry_map: dict = None) -> dict:
         "short_observe_candidate": _short_observe_candidate(s),
         # 上市以来总收益分位（后复权含分红，描述性，0-1，非市价分位）
         "price_pctile_life":      s.price_pctile_life,
+        # EMA20 跟随纪律 + MACD 买入关注（全市场扫描结果）。
+        # 注意这里**没有绝对价格** —— 全市场拿不到不复权实时价，做不了前复权换算，
+        # above_ema_pct 是比值可以放心用。自选股接口另有带前复权价的 watch 字段。
+        "watch_tag":              s.watch_tag,
+        "watch_tag_reason":       s.watch_tag_reason,
+        "watch_above_ema_pct":    s.watch_above_ema_pct,
+        "watch_kline_date":       str(s.watch_kline_date) if s.watch_kline_date else None,
+        "macd_dif":               s.macd_dif,
+        "macd_dea":               s.macd_dea,
+        "macd_hist":              s.macd_hist,
+        "macd_cross_up":          bool(s.macd_cross_up),
+        "macd_reason":            s.macd_reason,
+        # 跳空缺口信号：突破 / 加油 / 衰竭 / 加仓
+        "gap_signal":             s.gap_signal,
+        "gap_days_since":         s.gap_days_since,
+        "gap_confirm_date":       str(s.gap_confirm_date) if s.gap_confirm_date else None,
+        "gap_lower":              s.gap_lower,
+        "gap_upper":              s.gap_upper,
+        "gap_reason":             s.gap_reason,
+        "watch_updated":          str(s.watch_updated) if s.watch_updated else None,
     }
 
 

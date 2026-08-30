@@ -56,9 +56,9 @@
 
         <!-- 步骤 3 -->
         <div v-if="setupStep === 2" class="setup-action">
-          <span>✓ 行业评分完成。第 3 步：生成个股买卖信号</span>
+          <span>✓ 行业评分完成。第 3 步：生成纪律标签与 MACD / 缺口信号</span>
           <el-button type="success" :loading="refreshingSignals" @click="refreshSignals" style="margin-left:12px">
-            {{ refreshingSignals ? '生成中...' : '▶ 生成买卖信号' }}
+            {{ refreshingSignals ? '生成中...' : '▶ 生成信号' }}
           </el-button>
         </div>
 
@@ -356,11 +356,16 @@ async function rescoreAllIndustries() {
   }
 }
 
+// 原先调的是已停用的长期信号接口，点了不会有任何可见变化。
+// 换成真正驱动现有标签的全市场重算（同步，约 5 秒）。
 async function refreshSignals() {
   refreshingSignals.value = true
   try {
-    await stockApi.refreshAllSignals()
-    ElMessage.success('信号生成已在后台启动，完成后在「公司筛选」页查看')
+    const r = await stockApi.refreshWatchTags()
+    ElMessage.success(
+      `已重算 ${r.scanned} 只：可跟进 ${r.tag_counts?.FOLLOW || 0}，` +
+      `MACD 金叉 ${r.macd_cross_up}。可在「公司筛选」页查看`
+    )
   } finally {
     refreshingSignals.value = false
   }

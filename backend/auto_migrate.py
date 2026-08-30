@@ -59,6 +59,29 @@ COLUMN_ADDS = [
 
     # 上市以来价格分位（描述性指标，仅展示）
     ("stocks", "price_pctile_life", "FLOAT"),
+
+    # EMA20 跟随纪律 + MACD 零轴上方回踩金叉（全市场扫描落库，供筛选页 SQL 过滤/排序）
+    ("stocks", "watch_tag",           "VARCHAR(15)"),
+    ("stocks", "watch_tag_reason",    "TEXT"),
+    ("stocks", "watch_above_ema_pct", "FLOAT"),
+    ("stocks", "watch_kline_date",    "DATE"),
+    ("stocks", "macd_dif",            "FLOAT"),
+    ("stocks", "macd_dea",            "FLOAT"),
+    ("stocks", "macd_hist",           "FLOAT"),
+    ("stocks", "macd_cross_up",       "BOOLEAN DEFAULT 0"),
+    ("stocks", "macd_reason",         "TEXT"),
+    ("stocks", "watch_updated",       "DATETIME"),
+
+    # 跳空缺口信号（突破 / 加油 / 衰竭 / 加仓）
+    ("stocks", "gap_signal",     "VARCHAR(15)"),
+    ("stocks", "gap_days_since", "INTEGER"),
+    ("stocks", "gap_confirm_date", "DATE"),
+    ("stocks", "gap_lower",      "FLOAT"),
+    ("stocks", "gap_upper",      "FLOAT"),
+    ("stocks", "gap_reason",     "TEXT"),
+
+    # 快照浅增量写入的 bar 标记，供后续真实 hfq 拉取覆盖
+    ("price_data", "is_snapshot", "BOOLEAN DEFAULT 0"),
 ]
 
 
@@ -67,6 +90,10 @@ INDEX_CREATES = [
     ("ix_backtest_runs_signal_type", "backtest_runs", "signal_type"),
     ("ix_price_data_stock_date", "price_data", "stock_code, trade_date"),
     ("ix_news_items_stock_pub_date", "news_items", "stock_code, pub_date"),
+    # 筛选页要按这两列过滤全市场 5500 行
+    ("ix_stocks_watch_tag",     "stocks", "watch_tag"),
+    ("ix_stocks_macd_cross_up", "stocks", "macd_cross_up"),
+    ("ix_stocks_gap_signal",    "stocks", "gap_signal"),
 ]
 
 # (index_name, create_sql) — 部分索引无法用 columns_csv 表达

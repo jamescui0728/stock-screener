@@ -107,14 +107,16 @@
       >
         <el-table-column prop="stock_code" label="代码" width="90" fixed />
         <el-table-column prop="stock_name" label="名称" width="120" fixed />
-        <el-table-column label="长期" width="80">
+        <el-table-column label="纪律" width="100">
           <template #default="{ row }">
-            <SignalBadge :signal="row.signal" />
+            <WatchTagBadge :watch="{ tag: row.watch_tag, tag_reason: row.watch_tag_reason }" />
           </template>
         </el-table-column>
-        <el-table-column label="短期" width="80">
+        <el-table-column label="MACD" width="90">
           <template #default="{ row }">
-            <SignalBadge :signal="row.short_signal" />
+            <el-tag v-if="row.macd_cross_up" type="danger" effect="dark" size="small"
+                    style="font-weight:700">⚡ 金叉</el-tag>
+            <span v-else class="no-data">—</span>
           </template>
         </el-table-column>
         <el-table-column label="持股" width="90" align="right" prop="shares" sortable>
@@ -220,14 +222,13 @@
         <el-form-item label="名称" v-if="quote.name">
           <div class="quote-line">
             <span class="quote-name">{{ quote.name }}</span>
-            <SignalBadge :signal="quote.signal" />
+            <WatchTagBadge :watch="{ tag: quote.watch_tag, tag_reason: quote.watch_tag_reason }" />
             <span v-if="quote.composite_score != null" class="quote-score">
               {{ quote.composite_score?.toFixed(1) }}
             </span>
-            <SignalBadge :signal="quote.short_signal" />
-            <span v-if="quote.short_composite_score != null" class="quote-score short">
-              {{ quote.short_composite_score?.toFixed(1) }}
-            </span>
+            <!-- short_composite_score 已从 /paper/quote 返回值里移除，不再展示 -->
+            <el-tag v-if="quote.macd_cross_up" type="danger" effect="dark" size="small"
+                    style="font-weight:700">⚡ MACD 金叉</el-tag>
           </div>
         </el-form-item>
         <el-form-item label="最新价" v-if="quote.close">
@@ -346,7 +347,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { paperApi } from '@/api'
-import SignalBadge from '@/components/SignalBadge.vue'
+import WatchTagBadge from '@/components/WatchTagBadge.vue'
 
 // ── 费率/最低股数：从后端读（响应"参数设置"热更新）──
 const rules = ref({ fee_rate: 0.0003, min_fee: 5.0, lot_size: 100, init_cash: 1_000_000 })
@@ -373,7 +374,7 @@ const renameAccountVisible = ref(false)
 const createAccountForm = reactive({ name: '', initial_cash: 1_000_000 })
 const renameAccountForm = reactive({ name: '' })
 
-const quote = reactive({ name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
+const quote = reactive({ name: '', watch_tag: '', watch_tag_reason: '', macd_cross_up: false, composite_score: null, close: null, trade_date: '' })
 
 const buyForm = reactive({
   stock_code: '',
@@ -507,13 +508,13 @@ async function loadQuote(code) {
     const q = await paperApi.quote(code)
     Object.assign(quote, q)
   } catch {
-    Object.assign(quote, { name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
+    Object.assign(quote, { name: '', watch_tag: '', watch_tag_reason: '', macd_cross_up: false, composite_score: null, close: null, trade_date: '' })
   }
 }
 
 // ── 买入 ──
 function openBuyDialog(row = null) {
-  Object.assign(quote, { name: '', signal: '', composite_score: null, short_signal: '', short_composite_score: null, close: null, trade_date: '' })
+  Object.assign(quote, { name: '', watch_tag: '', watch_tag_reason: '', macd_cross_up: false, composite_score: null, close: null, trade_date: '' })
   const lot = rules.value.lot_size || 100
   if (row) {
     // 持仓加仓：锁定 code
@@ -694,9 +695,9 @@ onMounted(async () => {
 .section-hint { font-size: 12px; color: #888; font-weight: 400; }
 
 .quote-line { display: flex; align-items: center; gap: 8px; }
+.no-data { color: #c0c4cc; font-size: 13px; }
 .quote-name { font-weight: 600; font-size: 15px; }
 .quote-score { font-size: 12px; color: #409eff; }
-.quote-score.short { color: #e6a23c; }
 .quote-price { font-size: 18px; font-weight: 700; color: #f56c6c; }
 .quote-date  { font-size: 12px; color: #888; margin-left: 6px; }
 

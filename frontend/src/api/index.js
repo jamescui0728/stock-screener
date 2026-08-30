@@ -45,20 +45,43 @@ export const industryApi = {
   rescoreAll: ()        => http.post('/industries/rescore-all'),
 }
 
+/**
+ * 剔除空值参数（'' / null / undefined），只保留真正要过滤的项。
+ *
+ * el-select 的 clearable 清空后给的是 **空字符串**而不是 undefined，axios 会原样
+ * 拼进 query。对 Optional[str] 参数无害（后端 falsy 判断会忽略），但布尔参数会让
+ * FastAPI 报 422 bool_parsing、整个请求失败 —— 页面表现为"一只股票都没有"。
+ * 注意保留 0 和 false：它们是合法取值（min_composite=0 / macd_cross_up=false）。
+ */
+function compact(params) {
+  if (!params) return params
+  return Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== '' && v !== null && v !== undefined),
+  )
+}
+
 // ── 股票 ──
 export const stockApi = {
-  list: (params)                  => http.get('/stocks', { params }),
+  list: (params)                  => http.get('/stocks', { params: compact(params) }),
   detail: (code)                  => http.get(`/stocks/${code}`),
   refreshSignal: (code)           => http.post(`/stocks/${code}/signal`),
   refreshAllSignals: ()           => http.post('/signals/refresh-all'),
   // 短期信号（v200 新增）
   refreshShortSignal: (code)      => http.post(`/stocks/${code}/short-signal`),
   refreshAllShortSignals: ()      => http.post('/signals/refresh-short'),
+  // 全市场重算 EMA20 纪律标签 + MACD 零轴上方回踩金叉（同步，约 5 秒）
+  refreshWatchTags: ()            => http.post('/watch/refresh-all', null, { timeout: 60000 }),
 }
 
 // ── 自选股 ──
 export const watchlistApi = {
-  get: ()                   => http.get('/watchlist'),
+  // refreshPrice=true 会让后端现拉不复权实时价（打 sina，冷缓存约 26 秒）；
+  // 默认 false 只读 10 分钟缓存，页面秒开。自选股页面用"先快后慢"两步加载。
+  get: (refreshPrice = false) =>
+                    http.get('/watchlist', {
+                      params: { refresh_price: refreshPrice },
+                      timeout: refreshPrice ? 60000 : undefined,
+                    }),
   add: (code, note = '')    => http.post('/watchlist', { stock_code: code, note }),
   remove: (code)            => http.delete(`/watchlist/${code}`),
   news:         (days = 7, limit = 50) =>
