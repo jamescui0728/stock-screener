@@ -97,6 +97,7 @@ def fetch_industry_list(db: Session) -> int:
     if df is None or df.empty:
         return 0
     saved = 0
+    overwritten = 0
     for _, row in df.iterrows():
         name = str(row.get("板块名称", "")).strip()
         code = str(row.get("板块代码", "")).strip()
@@ -357,6 +358,16 @@ def fetch_price_history(db: Session, stock_code: str, start_date: str = "2010010
                 stock_code=stock_code, trade_date=trade_date
             ).first()
             if exists:
+                # 快照写的是近似 hfq（见 fetch_latest_bars_snapshot），这里拿到的是
+                # 真实 hfq —— 覆盖并清标记。非快照的历史 bar 仍然跳过。
+                if getattr(exists, "is_snapshot", False):
+                    exists.open   = _safe_float(row, "open")
+                    exists.high   = _safe_float(row, "high")
+                    exists.low    = _safe_float(row, "low")
+                    exists.close  = _safe_float(row, "close")
+                    exists.volume = _safe_float(row, "volume")
+                    exists.is_snapshot = False
+                    overwritten += 1
                 continue
             db.add(PriceData(
                 stock_code=stock_code,
@@ -370,8 +381,9 @@ def fetch_price_history(db: Session, stock_code: str, start_date: str = "2010010
             saved += 1
 
         db.commit()
-        if saved:
-            logger.info(f"行情 {stock_code}: 新增 {saved} 条")
+        if saved or overwritten:
+            extra = f"，覆盖快照 bar {overwritten} 条" if overwritten else ""
+            logger.info(f"行情 {stock_code}: 新增 {saved} 条{extra}")
     except Exception as e:
         logger.error(f"行情 {stock_code}: {e}")
     return saved
@@ -509,6 +521,17 @@ def fetch_turnover_today(db: Session, target_date: Optional[date] = None) -> dic
     return {"updated": updated, "skipped": len(turnover_map) - updated}
 
 
+# 标定集里"预测 hfq 收盘 vs 已知真实 hfq 收盘"的中位误差超过这个百分比就中止。
+# 正常情况下应当接近 0（同一天、同一只股票，纯粹的比例换算）。
+SNAPSHOT_MAX_PRICE_ERR_PCT = 0.5
+# 标定集至少要这么多只，否则样本不足以支撑单位比与误差判断
+SNAPSHOT_MIN_CALIB = 20
+# 逐只匹配率下限 —— 用来确认"这份 tape 确实是目标日的"。
+# 中位误差挡不住日期错位（平静的一天中位数也可能很小），但几百只股票同时对上
+# 只可能发生在日期真的一致时。这是防止把今天的盘口盖到旧 bar 上的主闸门。
+SNAPSHOT_MIN_MATCH_RATE = 0.9
+
+
 def _recent_trading_dates(db: Session, n: int = 15) -> list:
     """从库里已有数据反推最近的交易日序列（升序）。项目没有交易日历表，
     但 price_data 的 distinct trade_date 本身就是一份事实交易日历。"""
@@ -522,7 +545,8 @@ def _recent_trading_dates(db: Session, n: int = 15) -> list:
     return sorted(r[0] for r in rows)
 
 
-def calibrate_snapshot(snapshot: dict, known_bars: dict) -> dict:
+def calibrate_snapshot(snapshot: dict, known_bars: dict,
+                       tol_pct: float = None) -> dict:
     """
     用"已经有目标日 K 线"的股票做标定集，回答两个问题：
 
@@ -535,10 +559,19 @@ def calibrate_snapshot(snapshot: dict, known_bars: dict) -> dict:
          预测 hfq 收盘 = 快照最新价 × 因子，再与库里**已知的真实 hfq 收盘**比。
          误差大就说明方法不成立（除权、停牌、数据错位），应当中止而不是写脏数据。
 
+      3. 这份 tape 到底是不是目标日的？
+         spot_em 不返回日期。盘中拉到的是**实时未收盘**数据，收盘后拉到的是
+         **最近一个已完成交易日** —— 都未必等于我们想补的那一天。
+         用「有多大比例的标定股票能被重建到容差内」当指纹：不同交易日的个股涨跌
+         各不相同，一份错位的 tape 不可能让几百只股票同时对上。
+         match_rate 就是这个指纹，比中位误差可靠得多 —— 平静的一天中位误差可能
+         很小，但逐只匹配率会立刻塌掉。
+
     snapshot:   {code: {"open","high","low","close","prev_close","volume","turnover"}}
     known_bars: {code: (前一日 hfq 收盘, 目标日真实 hfq 收盘, 目标日真实 volume)}
+    tol_pct:    单只算"对上了"的容差（百分比）
 
-    返回 {"n", "vol_ratio", "price_err_pct", "samples"}；标定集为空时 vol_ratio=None。
+    返回 {"n", "vol_ratio", "price_err_pct", "match_rate", "samples"}
     """
     vol_ratios, price_errs = [], []
     for code, (prev_hfq_close, real_hfq_close, real_vol) in known_bars.items():
@@ -560,19 +593,17 @@ def calibrate_snapshot(snapshot: dict, known_bars: dict) -> dict:
         m = len(xs) // 2
         return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
 
+    tol = SNAPSHOT_MAX_PRICE_ERR_PCT if tol_pct is None else tol_pct
+    matched = sum(1 for e in price_errs if e <= tol)
     return {
         "n":             len(price_errs),
         "vol_ratio":     _median(vol_ratios),
         "price_err_pct": _median(price_errs),
+        "match_rate":    (matched / len(price_errs)) if price_errs else None,
         "samples":       len(known_bars),
     }
 
 
-# 标定集里"预测 hfq 收盘 vs 已知真实 hfq 收盘"的中位误差超过这个百分比就中止。
-# 正常情况下应当接近 0（同一天、同一只股票，纯粹的比例换算）。
-SNAPSHOT_MAX_PRICE_ERR_PCT = 0.5
-# 标定集至少要这么多只，否则样本不足以支撑单位比与误差判断
-SNAPSHOT_MIN_CALIB = 20
 
 
 def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
@@ -609,8 +640,11 @@ def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
     已知取舍
     --------
     若某股当日除权除息，hfq 因子当天会变，用昨收推出的因子会有约等于股息率的
-    偏差（通常 1-2%），且这类股票会被上面的误差检查放过（它只看中位数）。
-    后续任何一次正常的逐只 incremental / full 会用真实 hfq 值覆盖该 bar。
+    偏差（通常 1-2%），这类个股会被中位数检查放过。
+
+    因此写入的 bar 都打 `is_snapshot=True`：后续任何一次真实的逐只 hfq 拉取
+    （fetch_price_history）遇到带此标记的行会**覆盖**它并清除标记，而不是像
+    普通历史 bar 那样跳过。没有这个标记的话近似值会永久占位、挡住真实数据。
 
     返回 {"filled", "skipped", "vol_ratio", "price_err_pct", "target_date", ...}
     """
@@ -644,7 +678,13 @@ def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
             "turnover":   _f("换手率"),
         }
 
-    # ── 交易日：用库里已有数据反推，不猜今天是不是交易日 ──
+    # ── 目标日 ──
+    # spot_em 不返回日期，所以**不能**假设这份 tape 就是库里最新那天的：
+    #   * 盘中拉到的是实时未收盘数据
+    #   * 收盘后拉到的是最近一个已完成交易日，可能比库里最新日更新
+    # 两种情况下若按 dates[-1] 落盘，就是把别的日子的价格盖到旧 bar 上。
+    # 真正的判据是下面的 match_rate 指纹（几百只股票能否同时被重建出来）；
+    # 这里只负责挑出"值得一试"的候选日，最终由指纹裁决。
     dates = _recent_trading_dates(db)
     if len(dates) < 2:
         return {"filled": 0, "skipped": 0, "error": "库内交易日不足，无法定位目标日"}
@@ -688,6 +728,13 @@ def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
         return {"filled": 0, "skipped": 0, "error":
                 f"价格重建误差 {calib['price_err_pct']}% 超过阈值 "
                 f"{SNAPSHOT_MAX_PRICE_ERR_PCT}%，拒绝写入", **calib}
+    # 日期指纹：tape 必须能重建出目标日绝大多数标定股票，否则它就不是这一天的
+    # （盘中实时 / 更新的已完成交易日都会在这里被挡下）。
+    if calib["match_rate"] is None or calib["match_rate"] < SNAPSHOT_MIN_MATCH_RATE:
+        return {"filled": 0, "skipped": 0, "error":
+                f"逐只匹配率 {calib['match_rate']} < {SNAPSHOT_MIN_MATCH_RATE}，"
+                f"这份 tape 多半不是 {target} 的（盘中实时或更新的交易日），拒绝写入",
+                **calib}
     vol_ratio = calib["vol_ratio"] or 1.0
 
     # ── 补写 ──
@@ -717,6 +764,7 @@ def fetch_latest_bars_snapshot(db: Session, target_date: Optional[date] = None,
             close=lc * factor,
             volume=(snap["volume"] or 0) * vol_ratio,
             turnover_rate=snap["turnover"],
+            is_snapshot=True,      # 允许后续真实 hfq 拉取覆盖
         ))
         filled += 1
     if not dry_run:

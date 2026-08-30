@@ -79,6 +79,9 @@ COLUMN_ADDS = [
     ("stocks", "gap_lower",      "FLOAT"),
     ("stocks", "gap_upper",      "FLOAT"),
     ("stocks", "gap_reason",     "TEXT"),
+
+    # 快照浅增量写入的 bar 标记，供后续真实 hfq 拉取覆盖
+    ("price_data", "is_snapshot", "BOOLEAN DEFAULT 0"),
 ]
 
 

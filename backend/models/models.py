@@ -194,6 +194,10 @@ class PriceData(Base):
     pb         = Column(Float, nullable=True)
     market_cap = Column(Float, nullable=True)
     turnover_rate = Column(Float, nullable=True)   # 当日换手率（%）— akshare stock_zh_a_hist/spot_em
+    # 该 bar 是否由快照浅增量写入（fetch_latest_bars_snapshot）。
+    # 快照价是用「前日 hfq 收盘 / 快照昨收」推的近似 hfq，除权日会有股息率量级的偏差；
+    # 标为 True 后，后续真实的逐只 hfq 拉取会**覆盖**它而不是跳过（见 fetch_price_history）。
+    is_snapshot   = Column(Boolean, default=False)
 
     stock = relationship("Stock", back_populates="prices")
 
