@@ -97,7 +97,6 @@ def fetch_industry_list(db: Session) -> int:
     if df is None or df.empty:
         return 0
     saved = 0
-    overwritten = 0
     for _, row in df.iterrows():
         name = str(row.get("板块名称", "")).strip()
         code = str(row.get("板块代码", "")).strip()
@@ -336,6 +335,7 @@ def fetch_price_history(db: Session, stock_code: str, start_date: str = "2010010
         return 0
 
     saved = 0
+    overwritten = 0   # 被真实 hfq 覆盖掉的快照 bar 数
     today_str = date.today().strftime("%Y%m%d")
     if start_date >= today_str:
         return 0   # 已到今天/未来，没东西可拉

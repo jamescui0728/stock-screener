@@ -242,3 +242,89 @@ class TestSnapshotBarOverwrite(unittest.TestCase):
         self.assertAlmostEqual(got.volume, 1234.0)
         # 覆盖而非新增，不能产生重复行（price_data 没有唯一约束，靠代码保证）
         self.assertEqual(self.db.query(PriceData).count(), 1)
+
+
+class TestFetchPriceHistoryPaths(unittest.TestCase):
+    """
+    直接跑 fetch_price_history 的三条分支（akshare 用 mock 顶掉，不打网络）。
+
+    加这组测试的直接原因：上一轮把 `overwritten = 0` 误放进了另一个函数，
+    导致 fetch_price_history 里未初始化就自增。py_compile 检测不到这类错误，
+    当时也没有任何测试真正调用过这个函数。
+
+    两个必须做对、否则测了等于没测的点：
+
+      1. **断言要从新 session 读**。函数体被 try/except 包着，异常会被吞掉；
+         而 db.commit() 之前抛出的异常虽然没提交，同一个 session 的身份映射
+         仍会返回内存里的脏对象 —— 用原 session 断言会误判成"成功了"。
+      2. **要断言没有 logger.error**。被吞掉的异常只留下一行 error 日志，
+         这是唯一能观测到"内部炸了"的信号。
+    """
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+        self.db = self.Session()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _fresh(self):
+        """独立 session：只能看到真正 commit 过的数据。"""
+        return self.Session()
+
+    @staticmethod
+    def _fake_df():
+        import pandas as pd
+        return pd.DataFrame([
+            {"date": "2026-08-27", "open": 9.9, "high": 10.2, "low": 9.8,
+             "close": 10.0, "volume": 1000.0},
+            {"date": "2026-08-28", "open": 10.0, "high": 10.6, "low": 9.95,
+             "close": 10.5, "volume": 2000.0},
+        ])
+
+    def _run(self):
+        """跑一次抓取，返回 (新增条数, 是否记录过 error)。"""
+        from unittest.mock import patch, MagicMock
+        import data.fetcher as F
+        fake_logger = MagicMock()
+        with patch.object(F, "_retry", return_value=self._fake_df()), \
+             patch.object(F, "logger", fake_logger):
+            n = F.fetch_price_history(self.db, "000001", start_date="20100101")
+        errs = [c for c in fake_logger.error.call_args_list]
+        return n, errs
+
+    def test_全新插入(self):
+        n, errs = self._run()
+        self.assertEqual(errs, [], f"不该有内部异常被吞掉：{errs}")
+        self.assertEqual(n, 2)
+        self.assertEqual(self._fresh().query(PriceData).count(), 2)
+
+    def test_已有普通bar不覆盖也不重复(self):
+        self.db.add(PriceData(stock_code="000001", trade_date=date(2026, 8, 28),
+                              close=99.0, volume=1.0))          # is_snapshot 默认 False
+        self.db.commit()
+        n, errs = self._run()
+        self.assertEqual(errs, [], f"不该有内部异常被吞掉：{errs}")
+        self.assertEqual(n, 1)                                   # 只新增 08-27
+        rows = self._fresh().query(PriceData).filter_by(trade_date=date(2026, 8, 28)).all()
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0].close, 99.0)              # 普通 bar 不被动
+
+    def test_已有快照bar被真实值覆盖(self):
+        """未初始化计数器时，overwritten += 1 会在 commit 之前抛异常 → 覆盖丢失。"""
+        self.db.add(PriceData(stock_code="000001", trade_date=date(2026, 8, 28),
+                              open=1.0, high=1.0, low=1.0, close=99.0,
+                              volume=1.0, is_snapshot=True))
+        self.db.commit()
+
+        n, errs = self._run()
+        self.assertEqual(errs, [], f"不该有内部异常被吞掉：{errs}")
+        self.assertEqual(n, 1)                                   # 08-27 新增；08-28 是覆盖不计入
+
+        rows = self._fresh().query(PriceData).filter_by(trade_date=date(2026, 8, 28)).all()
+        self.assertEqual(len(rows), 1, "覆盖不应产生重复行")
+        self.assertAlmostEqual(rows[0].close, 10.5, msg="必须落库为真实 hfq")
+        self.assertAlmostEqual(rows[0].volume, 2000.0)
+        self.assertFalse(rows[0].is_snapshot, "覆盖后必须清除标记")
